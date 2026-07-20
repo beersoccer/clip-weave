@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -58,17 +59,18 @@ def _extract_frames(
     frames_dir: Path,
 ) -> None:
     """Extract frames via FFmpeg scene detection; fallback to fps=1 if none extracted."""
+    if frames_dir.exists():
+        shutil.rmtree(frames_dir)
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_pattern = str(frames_dir / "frame_%04d.jpg")
 
     # Primary: scene-change based extraction
     result = subprocess.run(
         [
-            "ffmpeg", "-i", video_path,
+            "ffmpeg", "-y", "-i", video_path,
             "-vf", f"select='gt(scene,{scene_threshold})',scale=1280:720",
             "-vsync", "vfr",
             output_pattern,
-            "-y",
         ],
         capture_output=True,
         text=True,
@@ -84,10 +86,9 @@ def _extract_frames(
     if not extracted:
         result = subprocess.run(
             [
-                "ffmpeg", "-i", video_path,
+                "ffmpeg", "-y", "-i", video_path,
                 "-vf", "fps=1",
                 output_pattern,
-                "-y",
             ],
             capture_output=True,
             text=True,
@@ -142,6 +143,11 @@ def analyze_video(
 
     # Step 2: load frames
     frame_parts = _load_frames_as_parts(frames_dir)
+    if not frame_parts:
+        raise VideoAnalysisError(
+            "No frames could be extracted from the video",
+            stderr="Both scene-detection and fps=1 extraction produced zero frames",
+        )
 
     # Step 3: configure Gemini and send request
     if gemini_api_key:
