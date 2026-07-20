@@ -1,0 +1,26 @@
+{
+  "style": {
+    "pacing": "fast",
+    "color_tone": "warm",
+    "typography": "bold-sans",
+    "transition": "cut",
+    "aspect_ratio": "9:16"
+  },
+  "shots": [
+    {
+      "index": 1, "start": 0.0, "end": 2.5, "duration": 2.5,
+      "type": "hook", "composition": "centered",
+      "text_overlay": "痛点文案", "visual_element": "人物特写",
+      "audio_cue": "节奏感强的背景音乐起"
+    },
+    {
+      "index": 2, "start": 2.5, "end": 5.0, "duration": 2.5,
+      "type": "product", "composition": "rule-of-thirds",
+      "text_overlay": null, "visual_element": "产品特写",
+      "audio_cue": null
+    }
+  ],
+  "narrative_structure": "AIDA",
+  "total_duration": 30.0,
+  "shot_count": 2
+}

@@ -1,0 +1,9 @@
+{
+  "brand_name": "TestBrand",
+  "tagline": "Better Every Day",
+  "logo_path": null,
+  "product_images": [],
+  "color_palette": ["#FF5733", "#FFFFFF"],
+  "copy_points": ["高品质原料", "限时优惠"],
+  "target_aspect_ratio": "9:16"
+}
