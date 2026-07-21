@@ -76,3 +76,41 @@ def test_load_config_any_model_string_accepted():
     with patch.dict(os.environ, _env(HTML_GEN_MODEL="any-model-name-v99"), clear=True):
         cfg = load_config()
     assert cfg.html_gen_model == "any-model-name-v99"
+
+
+def test_load_config_gateway_html_model_default():
+    """When HTML_GEN_BASE_URL is set but HTML_GEN_MODEL is not, default to gateway name."""
+    with patch.dict(os.environ, _env(
+        HTML_GEN_BASE_URL="http://gw.example.com/bedrock/",
+    ), clear=True):
+        cfg = load_config()
+    assert cfg.html_gen_model == "global.anthropic.claude-sonnet-4-6"
+
+
+def test_load_config_direct_html_model_default():
+    """When HTML_GEN_BASE_URL is not set, default to direct Anthropic model name."""
+    with patch.dict(os.environ, _env(), clear=True):
+        cfg = load_config()
+    assert cfg.html_gen_model == "claude-sonnet-4-6"
+
+
+def test_load_config_video_base_url_missing_v1_warns(caplog):
+    """VIDEO_ANALYSIS_BASE_URL without /v1 should produce a warning."""
+    import logging
+    with patch.dict(os.environ, _env(
+        VIDEO_ANALYSIS_BASE_URL="http://gw.example.com/vertex/",
+    ), clear=True):
+        with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
+            load_config()
+    assert "v1" in caplog.text
+
+
+def test_load_config_video_base_url_with_v1_no_warn(caplog):
+    """VIDEO_ANALYSIS_BASE_URL ending with /v1 should NOT produce a v1 warning."""
+    import logging
+    with patch.dict(os.environ, _env(
+        VIDEO_ANALYSIS_BASE_URL="http://gw.example.com/vertex/v1",
+    ), clear=True):
+        with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
+            load_config()
+    assert "does not end with /v1" not in caplog.text
