@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
+from anthropic import Anthropic
 
 from clip_weave.config import Config
 from clip_weave.schemas.brand_assets import BrandAssets
@@ -12,6 +12,7 @@ from clip_weave.schemas.shots import ShotsOutput
 logger = logging.getLogger(__name__)
 
 _HTML_RE = re.compile(r"<html[\s>]", re.IGNORECASE)
+_HTML_END_RE = re.compile(r"</html\s*>", re.IGNORECASE)
 _MAX_RETRIES = 2
 
 
@@ -50,18 +51,26 @@ def _call_llm(prompt: str, cfg: Config) -> str:
             "Set HTML_GEN_API_KEY in .env"
         )
 
-    client = OpenAI(
-        base_url=cfg.html_gen_base_url,
-        api_key=cfg.html_gen_api_key or "missing",
-    )
+    api_key = cfg.html_gen_api_key or "missing"
+    # Gateway expects Authorization: Bearer — use auth_token.
+    # Direct Anthropic API expects x-api-key — use api_key.
+    if cfg.html_gen_base_url:
+        client = Anthropic(base_url=cfg.html_gen_base_url, auth_token=api_key)
+    else:
+        client = Anthropic(api_key=api_key)
 
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=cfg.html_gen_model,
+            max_tokens=16384,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=8192,
         )
-        return response.choices[0].message.content or ""
+        if response.stop_reason == "max_tokens":
+            logger.warning(
+                "HTML generation hit max_tokens limit — output may be truncated. "
+                "Consider reducing shot count or simplifying the prompt."
+            )
+        return response.content[0].text
     except Exception as exc:
         hint = ""
         exc_lower = str(exc).lower()
@@ -77,7 +86,7 @@ def _call_llm(prompt: str, cfg: Config) -> str:
 
 
 def _is_valid_html(text: str) -> bool:
-    return bool(_HTML_RE.search(text))
+    return bool(_HTML_RE.search(text)) and bool(_HTML_END_RE.search(text))
 
 
 def generate_html(

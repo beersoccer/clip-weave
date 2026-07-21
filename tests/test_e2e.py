@@ -34,6 +34,18 @@ def _make_openai_mock(content: str) -> MagicMock:
     return mock_class
 
 
+def _make_anthropic_mock(content: str) -> MagicMock:
+    """Return a mock Anthropic class whose instances return content from messages.create."""
+    mock_content_block = MagicMock()
+    mock_content_block.text = content
+    mock_response = MagicMock()
+    mock_response.content = [mock_content_block]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_response
+    mock_class = MagicMock(return_value=mock_client)
+    return mock_class
+
+
 @pytest.mark.skipif(not TEST_VIDEO.exists(), reason="test_5s.mp4 not generated")
 def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
     """Full CLI `run` command produces a non-empty mp4 and writes shots.json."""
@@ -68,9 +80,11 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
 
     valid_html = "<html><body><div>Shot 1</div></body></html>"
 
-    # Single subprocess mock: writes a fake JPEG for ffmpeg frame extraction,
-    # succeeds silently for everything else (HyperFrames CLI, FFmpeg merge).
+    # Single subprocess mock: handles ffprobe (duration), ffmpeg frame extraction,
+    # and everything else (HyperFrames CLI, FFmpeg merge).
     def subprocess_side_effect(cmd, *args, **kwargs):
+        if cmd[0] == "ffprobe":
+            return MagicMock(returncode=0, stdout="5.0\n", stderr="")
         cmd_str = " ".join(str(c) for c in cmd)
         if "ffmpeg" in cmd_str:
             out_pattern = next((a for a in cmd if "frame_" in str(a)), None)
@@ -86,11 +100,11 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
     mp4_path.write_bytes(b"fake-mp4-content")
 
     mock_analyzer_openai = _make_openai_mock(shots_json)
-    mock_html_gen_openai = _make_openai_mock(valid_html)
+    mock_html_gen_anthropic = _make_anthropic_mock(valid_html)
 
     with patch("subprocess.run", side_effect=subprocess_side_effect), \
          patch("clip_weave.adapters.video_analyzer.OpenAI", mock_analyzer_openai), \
-         patch("clip_weave.core.html_generator.OpenAI", mock_html_gen_openai):
+         patch("clip_weave.core.html_generator.Anthropic", mock_html_gen_anthropic):
 
         runner = CliRunner()
         result = runner.invoke(
