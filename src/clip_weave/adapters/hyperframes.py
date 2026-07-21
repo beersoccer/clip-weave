@@ -30,7 +30,7 @@ def render_html_to_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     comp_dir = output_dir / "compositions"
     comp_dir.mkdir(exist_ok=True)
-    html_path = comp_dir / "composition.html"
+    html_path = comp_dir / "index.html"
     html_path.write_text(html_content, encoding="utf-8")
 
     out_path = _output_path(output_dir, video_name)
