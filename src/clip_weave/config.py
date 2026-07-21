@@ -51,9 +51,7 @@ def load_config() -> Config:
     return Config(
         video_analysis_base_url=os.getenv("VIDEO_ANALYSIS_BASE_URL") or None,
         video_analysis_api_key=video_analysis_api_key,
-        video_analysis_model=os.getenv(
-            "VIDEO_ANALYSIS_MODEL", "gemini-2.0-flash-exp"
-        ),
+        video_analysis_model=os.getenv("VIDEO_ANALYSIS_MODEL", "gemini-2.5-flash"),
         html_gen_base_url=os.getenv("HTML_GEN_BASE_URL") or None,
         html_gen_api_key=html_gen_api_key,
         html_gen_model=os.getenv("HTML_GEN_MODEL", "claude-sonnet-4-6"),

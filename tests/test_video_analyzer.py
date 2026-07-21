@@ -19,7 +19,7 @@ def _make_cfg(**kwargs) -> Config:
     defaults = dict(
         video_analysis_base_url=None,
         video_analysis_api_key="test-key",
-        video_analysis_model="gemini-2.0-flash-exp",
+        video_analysis_model="gemini-2.5-flash",
         html_gen_base_url=None,
         html_gen_api_key="test-key",
         html_gen_model="claude-sonnet-4-6",

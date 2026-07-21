@@ -18,7 +18,7 @@ def _env(**kwargs) -> dict:
 def test_load_config_defaults():
     with patch.dict(os.environ, _env(), clear=True):
         cfg = load_config()
-    assert cfg.video_analysis_model == "gemini-2.0-flash-exp"
+    assert cfg.video_analysis_model == "gemini-2.5-flash"
     assert cfg.html_gen_model == "claude-sonnet-4-6"
     assert cfg.scene_threshold == 0.35
     assert cfg.video_analysis_base_url is None

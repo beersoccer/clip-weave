@@ -108,7 +108,7 @@ cp .env.example .env
 # 视频帧分析（Stage 1）
 VIDEO_ANALYSIS_BASE_URL=               # 公司 AI 网关 /v1 地址；留空则直连厂商
 VIDEO_ANALYSIS_API_KEY=your_key        # 必填
-VIDEO_ANALYSIS_MODEL=gemini-2.0-flash-exp  # 可选，默认 gemini-2.0-flash-exp
+VIDEO_ANALYSIS_MODEL=gemini-2.5-flash          # 可选，默认 gemini-2.5-flash
 
 # HTML 生成（Stage 2a）
 HTML_GEN_BASE_URL=                     # 同上，可与 Stage 1 使用同一网关
