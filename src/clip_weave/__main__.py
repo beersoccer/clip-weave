@@ -37,6 +37,8 @@ def analyze_cmd(video: str, output: str):
 def run_cmd(video: str, brand: str, mode: str, html_model: str):
     cfg = load_config()
     if html_model:
+        if html_model not in {"claude", "gpt4o"}:
+            raise click.BadParameter(f"'{html_model}' is not valid; choose 'claude' or 'gpt4o'", param_hint="--html-model")
         cfg.html_gen_model = html_model
     brand_assets = _load_brand(brand)
     shots = analyze(video, cfg)
@@ -52,6 +54,8 @@ def run_cmd(video: str, brand: str, mode: str, html_model: str):
 def render_cmd(shots: str, brand: str, mode: str, html_model: str):
     cfg = load_config()
     if html_model:
+        if html_model not in {"claude", "gpt4o"}:
+            raise click.BadParameter(f"'{html_model}' is not valid; choose 'claude' or 'gpt4o'", param_hint="--html-model")
         cfg.html_gen_model = html_model
     shots_data = ShotsOutput.model_validate(json.loads(Path(shots).read_text()))
     brand_assets = _load_brand(brand)

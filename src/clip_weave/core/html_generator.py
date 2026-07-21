@@ -62,7 +62,7 @@ def _call_llm(prompt: str, cfg: Config) -> str:
         messages=[{"role": "user", "content": prompt}],
         max_tokens=4096,
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content or ""
 
 
 def _is_valid_html(text: str) -> bool:

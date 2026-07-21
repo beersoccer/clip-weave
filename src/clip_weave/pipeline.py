@@ -13,7 +13,12 @@ def analyze(
     cfg: Config,
     output_dir: Path = Path("output"),
 ) -> ShotsOutput:
-    shots = analyze_video(video_path, scene_threshold=cfg.scene_threshold)
+    shots = analyze_video(
+        video_path,
+        scene_threshold=cfg.scene_threshold,
+        gemini_api_key=cfg.gemini_api_key,
+        frames_dir=output_dir / "frames",
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "shots.json").write_text(
         shots.model_dump_json(indent=2), encoding="utf-8"
