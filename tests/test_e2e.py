@@ -80,9 +80,11 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
 
     valid_html = "<html><body><div>Shot 1</div></body></html>"
 
-    # Single subprocess mock: writes a fake JPEG for ffmpeg frame extraction,
-    # succeeds silently for everything else (HyperFrames CLI, FFmpeg merge).
+    # Single subprocess mock: handles ffprobe (duration), ffmpeg frame extraction,
+    # and everything else (HyperFrames CLI, FFmpeg merge).
     def subprocess_side_effect(cmd, *args, **kwargs):
+        if cmd[0] == "ffprobe":
+            return MagicMock(returncode=0, stdout="5.0\n", stderr="")
         cmd_str = " ".join(str(c) for c in cmd)
         if "ffmpeg" in cmd_str:
             out_pattern = next((a for a in cmd if "frame_" in str(a)), None)
