@@ -157,6 +157,9 @@ def analyze_video(
             "Set VIDEO_ANALYSIS_API_KEY in .env"
         )
 
+    # When no gateway is configured, use Gemini's OpenAI-compatible endpoint directly.
+    if not base_url:
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
     client = OpenAI(base_url=base_url, api_key=api_key or "missing")
 
     messages = [

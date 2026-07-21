@@ -21,27 +21,25 @@ CFG = Config(
 )
 
 
-def _make_openai_mock(responses: list[str]) -> MagicMock:
-    """Return a mock OpenAI class whose instances cycle through responses."""
+def _make_anthropic_mock(responses: list[str]) -> MagicMock:
+    """Return a mock Anthropic class whose instances cycle through responses."""
     side_effects = []
-    for content in responses:
-        mock_message = MagicMock()
-        mock_message.content = content
-        mock_choice = MagicMock()
-        mock_choice.message = mock_message
+    for text in responses:
+        mock_content_block = MagicMock()
+        mock_content_block.text = text
         mock_response = MagicMock()
-        mock_response.choices = [mock_choice]
+        mock_response.content = [mock_content_block]
         side_effects.append(mock_response)
 
     mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = side_effects
+    mock_client.messages.create.side_effect = side_effects
     return MagicMock(return_value=mock_client)
 
 
 def test_generate_html_returns_html_string(tmp_path):
     valid_html = "<html><body><div>Shot 1</div></body></html>"
-    mock_openai = _make_openai_mock([valid_html])
-    with patch("clip_weave.core.html_generator.OpenAI", mock_openai):
+    mock_anthropic = _make_anthropic_mock([valid_html])
+    with patch("clip_weave.core.html_generator.Anthropic", mock_anthropic):
         result = generate_html(SHOTS, BRAND, CFG, output_dir=tmp_path)
     assert "<html>" in result
 
@@ -49,16 +47,16 @@ def test_generate_html_returns_html_string(tmp_path):
 def test_generate_html_retries_on_invalid_html(tmp_path):
     invalid = "not html at all %%"
     valid_html = "<html><body>ok</body></html>"
-    mock_openai = _make_openai_mock([invalid, valid_html])
-    with patch("clip_weave.core.html_generator.OpenAI", mock_openai):
+    mock_anthropic = _make_anthropic_mock([invalid, valid_html])
+    with patch("clip_weave.core.html_generator.Anthropic", mock_anthropic):
         result = generate_html(SHOTS, BRAND, CFG, output_dir=tmp_path)
-    assert mock_openai.return_value.chat.completions.create.call_count == 2
+    assert mock_anthropic.return_value.messages.create.call_count == 2
     assert "<html>" in result
 
 
 def test_generate_html_dumps_debug_after_max_retries(tmp_path):
-    mock_openai = _make_openai_mock(["not html", "not html", "not html"])
-    with patch("clip_weave.core.html_generator.OpenAI", mock_openai):
+    mock_anthropic = _make_anthropic_mock(["not html", "not html", "not html"])
+    with patch("clip_weave.core.html_generator.Anthropic", mock_anthropic):
         with pytest.raises(ValueError, match="HTML generation failed"):
             generate_html(SHOTS, BRAND, CFG, output_dir=tmp_path)
     debug_files = list((tmp_path / "debug").glob("*.txt"))
