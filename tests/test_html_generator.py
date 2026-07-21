@@ -61,3 +61,14 @@ def test_generate_html_dumps_debug_after_max_retries(tmp_path):
             generate_html(SHOTS, BRAND, CFG, output_dir=tmp_path)
     debug_files = list((tmp_path / "debug").glob("*.txt"))
     assert len(debug_files) == 1
+
+
+def test_generate_html_rejects_truncated_html(tmp_path):
+    """HTML with opening tag but no </html> is treated as invalid (truncated output)."""
+    truncated = "<html><body><script>gsap.to('.s1',"  # cut off mid-generation
+    valid_html = "<html><body>ok</body></html>"
+    mock_anthropic = _make_anthropic_mock([truncated, valid_html])
+    with patch("clip_weave.core.html_generator.Anthropic", mock_anthropic):
+        result = generate_html(SHOTS, BRAND, CFG, output_dir=tmp_path)
+    assert mock_anthropic.return_value.messages.create.call_count == 2
+    assert "<html>" in result and "</html>" in result.lower()
