@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from clip_weave.adapters.videoagent import analyze_video
+from clip_weave.adapters.video_analyzer import analyze_video
 from clip_weave.adapters.hyperframes import render_html_to_video
 from clip_weave.core.html_generator import generate_html
 from clip_weave.schemas.shots import ShotsOutput

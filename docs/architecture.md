@@ -27,12 +27,11 @@ Stage 1 共用 VideoAgent；Stage 2-4 由 `render_mode` 参数控制走哪条路
 │  输入：样例视频 (MP4/MOV) + 品牌素材包                            │
 │        + render_mode: "vimax" | "hyperframes"                    │
 │                                                                   │
-│  Stage 1: 视频理解层  ←── HKUDS/VideoAgent        （共用）        │
+│  Stage 1: 视频帧分析层                              （共用）        │
 │  ┌───────────────────────────────────────────────────────────┐   │
-│  │  Gemini：逐帧精细视觉理解（场景/角色/构图/色调）            │   │
-│  │  Claude：Agentic Graph Router（意图解析+工作流规划）        │   │
-│  │  GPT-4o：内容摘要、脚本重构、叙事结构识别                  │   │
-│  │  输出: shots.json + style.json                             │   │
+│  │  FFmpeg：场景切变检测 → 关键帧提取                          │   │
+│  │  LLM（可配置）：多模态逐帧分析（场景/构图/色调/叙事）       │   │
+│  │  输出: shots.json（ShotsOutput schema）                    │   │
 │  └──────────────────────────┬────────────────────────────────┘   │
 │                             │                                     │
 │               ┌─────────────┴──────────────┐                     │
@@ -59,7 +58,7 @@ Stage 1 共用 VideoAgent；Stage 2-4 由 `render_mode` 参数控制走哪条路
 
 | 层级 | 组件 | 来源 | 路径 | 用途 |
 |---|---|---|---|---|
-| **视频理解** | VideoAgent | HKUDS/VideoAgent | 共用 | 样例视频分析 → shots.json |
+| **视频帧分析** | video_analyzer | clip-weave 内置 | 共用 | FFmpeg 帧提取 + LLM 多模态分析 → shots.json |
 | **素材搜索** | Pexels / Pixabay API | 免费 | 共用 | B-Roll 视频 + 图片素材 |
 | **语音合成** | Kokoro TTS | hexgrad/kokoro | 共用 | 旁白音频生成（本地，免费） |
 | **视频处理** | FFmpeg | 系统级 | 共用 | 关键帧提取、多比例转码、音频合并 |
@@ -76,7 +75,7 @@ clip-weave/
 │   ├── pipeline.py
 │   ├── config.py
 │   ├── adapters/
-│   │   ├── videoagent.py
+│   │   ├── video_analyzer.py
 │   │   └── hyperframes.py
 │   ├── core/
 │   │   ├── html_generator.py
@@ -85,7 +84,6 @@ clip-weave/
 │       ├── shots.py
 │       └── brand_assets.py
 ├── vendors/
-│   ├── VideoAgent/              # git submodule (HKUDS/VideoAgent)
 │   └── hyperframes/             # git submodule (heygen-com/hyperframes)
 ├── assets/brand/
 ├── output/
@@ -103,7 +101,7 @@ clip-weave/
 
 目标：给定样例视频，自动输出结构化 shots.json。
 
-- [x] 集成 VideoAgent（git submodule），封装 `adapters/videoagent.py`
+- [x] 实现 `adapters/video_analyzer.py`（FFmpeg 帧提取 + LLM 多模态分析）
 - [x] 验证 FFmpeg 关键帧提取 + Gemini Flash 分析 pipeline
 - [x] 确认 shots.json 输出格式与 narrative_structure 识别准确率
 - [x] 实现 `python -m clip_weave analyze` CLI 命令
@@ -180,7 +178,6 @@ clip-weave/
 
 | 资源 | 链接 |
 |---|---|
-| VideoAgent | https://github.com/HKUDS/VideoAgent |
 | ViMax | https://github.com/HKUDS/ViMax |
 | HyperFrames | https://github.com/heygen-com/hyperframes |
 | DeepScene | https://github.com/PhanTrongGiap/deepscene |

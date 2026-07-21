@@ -1,6 +1,3 @@
-[submodule "vendors/VideoAgent"]
-	path = vendors/VideoAgent
-	url = https://github.com/HKUDS/VideoAgent.git
 [submodule "vendors/hyperframes"]
 	path = vendors/hyperframes
 	url = https://github.com/heygen-com/hyperframes.git

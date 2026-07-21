@@ -86,7 +86,7 @@ git clone --recurse-submodules https://github.com/your-org/clip-weave.git
 cd clip-weave
 ```
 
-> `--recurse-submodules` 会同时初始化 `vendors/VideoAgent` 和 `vendors/hyperframes`（作为参考实现）。
+> `--recurse-submodules` 会同时初始化 `vendors/hyperframes`（渲染参考实现）。
 
 ### 第二步：安装 Python 依赖
 
@@ -266,8 +266,8 @@ clip-weave/
 │   ├── pipeline.py          # 流程编排
 │   ├── config.py            # 环境变量加载
 │   ├── adapters/
-│   │   ├── videoagent.py    # FFmpeg + Gemini 视频分析
-│   │   └── hyperframes.py   # npx hyperframes 渲染封装
+│   │   ├── video_analyzer.py  # FFmpeg + LLM 视频帧分析
+│   │   └── hyperframes.py     # npx hyperframes 渲染封装
 │   ├── core/
 │   │   ├── html_generator.py  # LLM → HTML/CSS/GSAP
 │   │   └── asset_resolver.py  # Pexels 素材检索
@@ -275,8 +275,7 @@ clip-weave/
 │       ├── shots.py         # ShotsOutput / Shot / StyleInfo
 │       └── brand_assets.py  # BrandAssets
 ├── vendors/
-│   ├── VideoAgent/          # 参考实现（HKUDS/VideoAgent，无需安装其依赖）
-│   └── hyperframes/         # 参考实现（heygen-com/hyperframes）
+│   └── hyperframes/         # git submodule（heygen-com/hyperframes）
 ├── assets/brand/            # 品牌素材（gitignored）
 ├── output/                  # 生成结果（gitignored）
 ├── tests/
@@ -291,4 +290,3 @@ clip-weave/
 
 - [架构方案与实施路径](docs/architecture.md)
 - [技术选型分析](docs/tech-selection.md)
-- [AI 营销视频解决方案](docs/ai-marketing-video-solution.md)

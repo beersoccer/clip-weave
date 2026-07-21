@@ -64,7 +64,7 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
     #
     # Both adapters import `subprocess` and call `subprocess.run`.
     # Patching via two different module paths
-    # (clip_weave.adapters.videoagent.subprocess.run and
+    # (clip_weave.adapters.video_analyzer.subprocess.run and
     #  clip_weave.adapters.hyperframes.subprocess.run) both resolve to
     # setting the `run` attribute on the same shared subprocess module object.
     # Nested patch() calls stack: the second patch saves the first mock as its
@@ -100,7 +100,7 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
     mp4_path.write_bytes(b"fake-mp4-content")
 
     with patch("subprocess.run", side_effect=subprocess_side_effect), \
-         patch("clip_weave.adapters.videoagent.genai", mock_genai), \
+         patch("clip_weave.adapters.video_analyzer.genai", mock_genai), \
          patch("clip_weave.core.html_generator._get_claude_client", return_value=mock_claude):
 
         runner = CliRunner()

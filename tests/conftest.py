@@ -2,7 +2,7 @@
 import sys
 from unittest.mock import MagicMock
 
-# Stub google.generativeai so videoagent.py can be imported without
+# Stub google.generativeai so video_analyzer.py can be imported without
 # the real SDK installed in the test environment.
 google_mock = MagicMock()
 sys.modules.setdefault("google", google_mock)

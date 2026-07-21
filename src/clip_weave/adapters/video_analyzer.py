@@ -1,4 +1,4 @@
-"""VideoAgent adapter — FFmpeg frame extraction + Gemini Flash analysis."""
+"""Video frame analyzer — FFmpeg scene detection + LLM multimodal analysis → ShotsOutput."""
 
 import base64
 import json
