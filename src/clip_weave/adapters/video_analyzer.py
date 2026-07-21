@@ -149,7 +149,7 @@ def analyze_video(
 
     api_key = cfg.video_analysis_api_key if cfg else ""
     base_url = cfg.video_analysis_base_url if cfg else None
-    model = cfg.video_analysis_model if cfg else "gemini-2.0-flash-exp"
+    model = cfg.video_analysis_model if cfg else "gemini-2.5-flash"
 
     if not api_key:
         logger.warning(

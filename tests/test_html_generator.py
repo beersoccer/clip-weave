@@ -14,7 +14,7 @@ SHOTS = ShotsOutput.model_validate(json.loads((FIXTURE_DIR / "shots.json").read_
 BRAND = BrandAssets.model_validate(json.loads((FIXTURE_DIR / "brand_assets.json").read_text()))
 CFG = Config(
     video_analysis_base_url=None, video_analysis_api_key="k",
-    video_analysis_model="gemini-2.0-flash-exp",
+    video_analysis_model="gemini-2.5-flash",
     html_gen_base_url=None, html_gen_api_key="k",
     html_gen_model="claude-sonnet-4-6",
     pexels_api_key="k", scene_threshold=0.35,
