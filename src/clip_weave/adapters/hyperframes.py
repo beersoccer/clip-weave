@@ -1,10 +1,7 @@
 """HyperFrames adapter — HTML-to-video rendering with frame preservation."""
 
 import subprocess
-import sys
 from pathlib import Path
-
-_VENDOR_DIR = Path(__file__).parent.parent.parent.parent / "vendors" / "hyperframes"
 
 
 class HyperFramesError(Exception):
@@ -20,12 +17,9 @@ def _frames_dir(output_dir: Path) -> Path:
 
 
 def _build_render_command(html_path: Path, output_path: Path) -> list[str]:
-    # Adjust after reading vendors/hyperframes/README.md
-    return [
-        sys.executable, "-m", "hyperframes",
-        "--input", str(html_path),
-        "--output", str(output_path),
-    ]
+    # `npx hyperframes render` is run from the composition directory;
+    # html_path is implicitly index.html / composition.html in cwd.
+    return ["npx", "hyperframes", "render", "--output", str(output_path)]
 
 
 def render_html_to_video(
@@ -41,7 +35,7 @@ def render_html_to_video(
 
     out_path = _output_path(output_dir, video_name)
     cmd = _build_render_command(html_path, out_path)
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_VENDOR_DIR))
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(comp_dir))
 
     if result.returncode != 0:
         raise HyperFramesError(
