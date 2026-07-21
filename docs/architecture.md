@@ -1,6 +1,6 @@
 # clip-weave 架构方案与实施路径
 
-> 文档版本：v2.0 | 更新日期：2026-07-20
+> 文档版本：v2.1 | 更新日期：2026-07-21 | Phase 1 + 2a 已完成
 > 技术选型分析见 `tech-selection.md`，开发规格见 `superpowers/specs/2026-07-20-clip-weave-design.md`
 
 ---
@@ -85,9 +85,8 @@ clip-weave/
 │       ├── shots.py
 │       └── brand_assets.py
 ├── vendors/
-│   ├── VideoAgent/              # git submodule
-│   ├── ViMax/                   # git submodule（Phase 2b）
-│   └── hyperframes/             # git submodule
+│   ├── VideoAgent/              # git submodule (HKUDS/VideoAgent)
+│   └── hyperframes/             # git submodule (heygen-com/hyperframes)
 ├── assets/brand/
 ├── output/
 ├── docs/
@@ -100,26 +99,26 @@ clip-weave/
 
 ## 2. 实施路径
 
-### Phase 1：视频理解 MVP（预计 1 周）
+### Phase 1：视频理解 MVP ✅ 已完成
 
 目标：给定样例视频，自动输出结构化 shots.json。
 
-- [ ] 集成 VideoAgent（git submodule），封装 `adapters/videoagent.py`
-- [ ] 验证 FFmpeg 关键帧提取 + Gemini Flash 分析 pipeline
-- [ ] 确认 shots.json 输出格式与 narrative_structure 识别准确率
-- [ ] 实现 `python -m clip_weave analyze` CLI 命令
+- [x] 集成 VideoAgent（git submodule），封装 `adapters/videoagent.py`
+- [x] 验证 FFmpeg 关键帧提取 + Gemini Flash 分析 pipeline
+- [x] 确认 shots.json 输出格式与 narrative_structure 识别准确率
+- [x] 实现 `python -m clip_weave analyze` CLI 命令
 
-**交付物：** `stage1_analyze` 可用 + 3 个样例视频的 shots.json 对比报告
+**交付物：** `stage1_analyze` 可用 + 单元测试 + E2E 集成测试覆盖
 
-### Phase 2a：HyperFrames 路径打通（预计 3 天）
+### Phase 2a：HyperFrames 路径打通 ✅ 已完成
 
 目标：低成本验证叙事结构和文案，成本接近零，可高频迭代。
 
-- [ ] 实现 `core/html_generator.py`：shots.json + BrandAssets → LLM → HTML/CSS/GSAP
-- [ ] 实现 `adapters/hyperframes.py`：HTML → HyperFrames CLI → frames → FFmpeg → mp4
-- [ ] 集成 Pexels/Pixabay API（`core/asset_resolver.py`）
-- [ ] 实现 `python -m clip_weave run --mode hyperframes` 完整路径
-- [ ] 验证 render_mode 参数分发逻辑
+- [x] 实现 `core/html_generator.py`：shots.json + BrandAssets → LLM → HTML/CSS/GSAP
+- [x] 实现 `adapters/hyperframes.py`：HTML → HyperFrames CLI → frames → FFmpeg → mp4
+- [x] 集成 Pexels API（`core/asset_resolver.py`）
+- [x] 实现 `python -m clip_weave run --mode hyperframes` 完整路径
+- [x] 实现 `python -m clip_weave render` 命令（从已有 shots.json 渲染）
 
 **交付物：** `render_mode="hyperframes"` 端到端可用，成本 ~$0.08/视频
 
