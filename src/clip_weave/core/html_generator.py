@@ -12,6 +12,7 @@ from clip_weave.schemas.shots import ShotsOutput
 logger = logging.getLogger(__name__)
 
 _HTML_RE = re.compile(r"<html[\s>]", re.IGNORECASE)
+_HTML_END_RE = re.compile(r"</html\s*>", re.IGNORECASE)
 _MAX_RETRIES = 2
 
 
@@ -61,9 +62,14 @@ def _call_llm(prompt: str, cfg: Config) -> str:
     try:
         response = client.messages.create(
             model=cfg.html_gen_model,
-            max_tokens=8192,
+            max_tokens=16384,
             messages=[{"role": "user", "content": prompt}],
         )
+        if response.stop_reason == "max_tokens":
+            logger.warning(
+                "HTML generation hit max_tokens limit — output may be truncated. "
+                "Consider reducing shot count or simplifying the prompt."
+            )
         return response.content[0].text
     except Exception as exc:
         hint = ""
@@ -80,7 +86,7 @@ def _call_llm(prompt: str, cfg: Config) -> str:
 
 
 def _is_valid_html(text: str) -> bool:
-    return bool(_HTML_RE.search(text))
+    return bool(_HTML_RE.search(text)) and bool(_HTML_END_RE.search(text))
 
 
 def generate_html(
