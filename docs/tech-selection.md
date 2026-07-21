@@ -201,6 +201,23 @@ ffmpeg -i sample.mp4 -q:a 0 -map a audio.mp3
 
 > ⚠️ **VideoAgent 注：** VideoAgent 采用的技术路径（FFmpeg + Gemini 分析）与本项目一致，因此功能评分高。但其架构是交互式多 Agent 系统（入口为 `input("User Requirement:")`），无法以函数调用方式直接输出 shots.json，不适合作为 Python 库集成。Stage 2b（ViMax 路径）同样采用 HKUDS 生态，但 ViMax 是独立的生成框架，接口完全不同。
 
+#### 源码对比后的借鉴点
+
+对 DeepScene（shell 脚本）和 Storyboard（.NET 桌面 GUI）做了源码级分析，`video_analyzer.py` 在任务匹配度（内容感知场景检测 vs 均匀采样、营销专项 schema）和可嵌入性上均已超越两者。以下字段值得在后续阶段引入：
+
+**Phase 2b（ViMax 接入）时扩充到 `Shot` schema：**
+
+| 字段 | 来源 | 用途 |
+|---|---|---|
+| `reconstruction_prompt` | DeepScene | 每镜头的自然语言重创意描述，直接作为 ViMax/Kling prompt |
+| `uncertainties` | DeepScene | LLM 对该镜头分析不确定的项，用于人工审核和质量评估 |
+| `first_frame_prompt` | Storyboard | 首帧图像生成 prompt，供 Kling/Seedance 的 image2video 模式 |
+| `last_frame_prompt` | Storyboard | 末帧图像生成 prompt，控制镜头出点 |
+| `video_prompt` | Storyboard | 该镜头的视频生成 prompt（动作/摄影机运动综合描述） |
+| `camera_movement` | Storyboard | 摄影机运动方式（push in / pull out / pan / static 等） |
+
+**备用分析策略（复杂场景准确度提升）：** DeepScene 的两步法——先让 LLM 自由叙述每帧内容，再对叙述结果做结构化提取——对镜头内容复杂的视频比 clip-weave 当前的单步结构化调用更准确。可作为 `video_analyzer.py` 的 `--two-pass` 模式备选。
+
 ### 5.2 生成层 Pipeline：ViMax vs agentcut
 
 Stage 1 输出 `ShotsOutput`（结构化富内容：shots + style + narrative_structure）。Stage 2b 选哪个生成框架接收它？
