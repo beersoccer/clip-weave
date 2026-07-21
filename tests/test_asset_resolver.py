@@ -6,9 +6,11 @@ from clip_weave.config import Config
 from clip_weave.core.asset_resolver import search_pexels_videos, download_asset
 
 CFG = Config(
-    anthropic_api_key="k", openai_api_key="k",
-    gemini_api_key="k", pexels_api_key="test-pex",
-    html_gen_model="claude", scene_threshold=0.35,
+    video_analysis_base_url=None, video_analysis_api_key="k",
+    video_analysis_model="gemini-2.0-flash-exp",
+    html_gen_base_url=None, html_gen_api_key="k",
+    html_gen_model="claude-sonnet-4-6",
+    pexels_api_key="test-pex", scene_threshold=0.35,
 )
 
 PEXELS_RESPONSE = {

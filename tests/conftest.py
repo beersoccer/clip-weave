@@ -2,8 +2,7 @@
 import sys
 from unittest.mock import MagicMock
 
-# Stub google.generativeai so video_analyzer.py can be imported without
-# the real SDK installed in the test environment.
-google_mock = MagicMock()
-sys.modules.setdefault("google", google_mock)
-sys.modules.setdefault("google.generativeai", google_mock.generativeai)
+# Stub openai so video_analyzer.py and html_generator.py can be imported
+# without the real SDK installed in the test environment.
+openai_mock = MagicMock()
+sys.modules.setdefault("openai", openai_mock)

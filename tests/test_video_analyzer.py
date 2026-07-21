@@ -2,11 +2,12 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clip_weave.adapters.video_analyzer import analyze_video, VideoAnalysisError
+from clip_weave.adapters.video_analyzer import VideoAnalysisError, analyze_video
+from clip_weave.config import Config
 from clip_weave.schemas.shots import ShotsOutput
 
 FIXTURE_SHOTS = json.loads(
@@ -14,25 +15,47 @@ FIXTURE_SHOTS = json.loads(
 )
 
 
+def _make_cfg(**kwargs) -> Config:
+    defaults = dict(
+        video_analysis_base_url=None,
+        video_analysis_api_key="test-key",
+        video_analysis_model="gemini-2.0-flash-exp",
+        html_gen_base_url=None,
+        html_gen_api_key="test-key",
+        html_gen_model="claude-sonnet-4-6",
+        pexels_api_key="",
+        scene_threshold=0.35,
+    )
+    defaults.update(kwargs)
+    return Config(**defaults)
+
+
+def _make_openai_mock(content: str) -> MagicMock:
+    """Return a mock OpenAI client whose chat.completions.create returns content."""
+    mock_message = MagicMock()
+    mock_message.content = content
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_response
+    return mock_client
+
+
 def test_analyze_video_returns_shots_output(tmp_path):
     frames_dir = tmp_path / "frames"
 
     def ffmpeg_write_frame(*args, **kwargs):
-        # Simulate FFmpeg writing a frame into frames_dir (which was just recreated)
         frames_dir.mkdir(parents=True, exist_ok=True)
         (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    mock_response = MagicMock()
-    mock_response.text = json.dumps(FIXTURE_SHOTS)
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = _make_openai_mock(json.dumps(FIXTURE_SHOTS))
 
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_write_frame), \
-         patch("clip_weave.adapters.video_analyzer.genai", mock_genai):
-        result = analyze_video("test.mp4", frames_dir=frames_dir)
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
+        result = analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
     assert isinstance(result, ShotsOutput)
     assert result.shot_count == 2
@@ -42,7 +65,7 @@ def test_analyze_video_ffmpeg_failure_raises(tmp_path):
     mock_ffmpeg = MagicMock(returncode=1, stdout="", stderr="ffmpeg error")
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", return_value=mock_ffmpeg):
         with pytest.raises(VideoAnalysisError) as exc_info:
-            analyze_video("test.mp4", frames_dir=tmp_path / "frames")
+            analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=tmp_path / "frames")
     assert exc_info.value.stderr == "ffmpeg error"
 
 
@@ -54,20 +77,15 @@ def test_analyze_video_invalid_json_raises(tmp_path):
         (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    mock_response = MagicMock()
-    mock_response.text = "not valid json"
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = _make_openai_mock("not valid json")
 
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_write_frame), \
-         patch("clip_weave.adapters.video_analyzer.genai", mock_genai):
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
         with pytest.raises(VideoAnalysisError, match="invalid JSON"):
-            analyze_video("test.mp4", frames_dir=frames_dir)
+            analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
 
-def test_analyze_video_gemini_api_failure_raises(tmp_path):
+def test_analyze_video_api_failure_raises(tmp_path):
     frames_dir = tmp_path / "frames"
 
     def ffmpeg_write_frame(*args, **kwargs):
@@ -75,19 +93,17 @@ def test_analyze_video_gemini_api_failure_raises(tmp_path):
         (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    mock_model = MagicMock()
-    mock_model.generate_content.side_effect = Exception("API quota exceeded")
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = Exception("API quota exceeded")
 
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_write_frame), \
-         patch("clip_weave.adapters.video_analyzer.genai", mock_genai):
-        with pytest.raises(VideoAnalysisError, match="Gemini API"):
-            analyze_video("test.mp4", frames_dir=frames_dir)
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
+        with pytest.raises(VideoAnalysisError, match="LLM API call failed"):
+            analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
 
 def test_analyze_video_json_in_markdown_codeblock(tmp_path):
-    """Gemini often returns JSON wrapped in ```json ... ``` blocks."""
+    """LLMs often return JSON wrapped in ```json ... ``` blocks."""
     frames_dir = tmp_path / "frames"
 
     def ffmpeg_write_frame(*args, **kwargs):
@@ -95,16 +111,11 @@ def test_analyze_video_json_in_markdown_codeblock(tmp_path):
         (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    mock_response = MagicMock()
-    mock_response.text = f"```json\n{json.dumps(FIXTURE_SHOTS)}\n```"
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = _make_openai_mock(f"```json\n{json.dumps(FIXTURE_SHOTS)}\n```")
 
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_write_frame), \
-         patch("clip_weave.adapters.video_analyzer.genai", mock_genai):
-        result = analyze_video("test.mp4", frames_dir=frames_dir)
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
+        result = analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
     assert isinstance(result, ShotsOutput)
     assert result.shot_count == 2
@@ -115,41 +126,48 @@ def test_analyze_video_no_frames_raises(tmp_path):
     mock_ffmpeg = MagicMock(returncode=0, stdout="", stderr="")
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", return_value=mock_ffmpeg):
         with pytest.raises(VideoAnalysisError, match="No frames"):
-            analyze_video("test.mp4", frames_dir=frames_dir)
+            analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
 
 def test_analyze_video_fallback_fps_extraction(tmp_path):
     """When scene-detection yields 0 frames, fallback to fps=1 extraction."""
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()
-    # No frames initially — simulate scene extraction producing nothing,
-    # then fallback writes a frame.
-    mock_ffmpeg_scene = MagicMock(returncode=0, stdout="", stderr="")
-    mock_ffmpeg_fallback = MagicMock(returncode=0, stdout="", stderr="")
-
     call_count = 0
 
     def ffmpeg_side_effect(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # Scene extraction: don't write any frames
-            return mock_ffmpeg_scene
-        else:
-            # Fallback fps=1: write a frame
-            (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
-            return mock_ffmpeg_fallback
+            return MagicMock(returncode=0, stdout="", stderr="")
+        (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
+        return MagicMock(returncode=0, stdout="", stderr="")
 
-    mock_response = MagicMock()
-    mock_response.text = json.dumps(FIXTURE_SHOTS)
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = _make_openai_mock(json.dumps(FIXTURE_SHOTS))
 
     with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_side_effect), \
-         patch("clip_weave.adapters.video_analyzer.genai", mock_genai):
-        result = analyze_video("test.mp4", frames_dir=frames_dir)
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
+        result = analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
 
-    assert call_count == 2  # scene-detect + fallback
+    assert call_count == 2
     assert isinstance(result, ShotsOutput)
+
+
+def test_analyze_video_auth_error_hint(tmp_path):
+    """Auth errors should include a hint pointing to the relevant env vars."""
+    frames_dir = tmp_path / "frames"
+
+    def ffmpeg_write_frame(*args, **kwargs):
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = Exception("401 Unauthorized: invalid api key")
+
+    with patch("clip_weave.adapters.video_analyzer.subprocess.run", side_effect=ffmpeg_write_frame), \
+         patch("clip_weave.adapters.video_analyzer.OpenAI", return_value=mock_client):
+        with pytest.raises(VideoAnalysisError) as exc_info:
+            analyze_video("test.mp4", cfg=_make_cfg(), frames_dir=frames_dir)
+
+    assert "VIDEO_ANALYSIS_API_KEY" in str(exc_info.value)

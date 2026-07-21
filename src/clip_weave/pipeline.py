@@ -16,7 +16,7 @@ def analyze(
     shots = analyze_video(
         video_path,
         scene_threshold=cfg.scene_threshold,
-        gemini_api_key=cfg.gemini_api_key,
+        cfg=cfg,
         frames_dir=output_dir / "frames",
     )
     output_dir.mkdir(parents=True, exist_ok=True)

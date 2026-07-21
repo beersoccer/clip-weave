@@ -1,10 +1,23 @@
 import json
+import logging
+import sys
 from pathlib import Path
+
 import click
+
+from clip_weave.adapters.video_analyzer import VideoAnalysisError
 from clip_weave.config import load_config
 from clip_weave.pipeline import analyze, render
-from clip_weave.schemas.shots import ShotsOutput
 from clip_weave.schemas.brand_assets import BrandAssets
+from clip_weave.schemas.shots import ShotsOutput
+
+
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="[%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def _load_brand(brand_dir: str) -> BrandAssets:
@@ -16,7 +29,7 @@ def _load_brand(brand_dir: str) -> BrandAssets:
 
 @click.group()
 def cli():
-    pass
+    _setup_logging()
 
 
 @cli.command()
@@ -25,7 +38,13 @@ def cli():
 def analyze_cmd(video: str, output: str):
     cfg = load_config()
     out_path = Path(output)
-    shots = analyze(video, cfg, output_dir=out_path.parent)
+    try:
+        shots = analyze(video, cfg, output_dir=out_path.parent)
+    except VideoAnalysisError as exc:
+        click.echo(f"Error: video analysis failed — {exc}", err=True)
+        if exc.stderr:
+            click.echo(f"  FFmpeg stderr: {exc.stderr}", err=True)
+        sys.exit(1)
     click.echo(f"Analysis complete: {out_path} ({shots.shot_count} shots)")
 
 
@@ -33,16 +52,24 @@ def analyze_cmd(video: str, output: str):
 @click.option("--video", required=True)
 @click.option("--brand", required=True, help="Brand assets directory")
 @click.option("--mode", default="hyperframes", type=click.Choice(["hyperframes"]))
-@click.option("--html-model", default=None, help="claude or gpt4o (overrides env)")
+@click.option("--html-model", default=None, help="Model name for HTML generation (overrides HTML_GEN_MODEL)")
 def run_cmd(video: str, brand: str, mode: str, html_model: str):
     cfg = load_config()
     if html_model:
-        if html_model not in {"claude", "gpt4o"}:
-            raise click.BadParameter(f"'{html_model}' is not valid; choose 'claude' or 'gpt4o'", param_hint="--html-model")
         cfg.html_gen_model = html_model
     brand_assets = _load_brand(brand)
-    shots = analyze(video, cfg)
-    output = render(shots, brand_assets, cfg)
+    try:
+        shots = analyze(video, cfg)
+    except VideoAnalysisError as exc:
+        click.echo(f"Error: video analysis failed — {exc}", err=True)
+        if exc.stderr:
+            click.echo(f"  FFmpeg stderr: {exc.stderr}", err=True)
+        sys.exit(1)
+    try:
+        output = render(shots, brand_assets, cfg)
+    except ValueError as exc:
+        click.echo(f"Error: rendering failed — {exc}", err=True)
+        sys.exit(1)
     click.echo(f"Done: {output}")
 
 
@@ -50,16 +77,22 @@ def run_cmd(video: str, brand: str, mode: str, html_model: str):
 @click.option("--shots", required=True, help="Path to shots.json")
 @click.option("--brand", required=True)
 @click.option("--mode", default="hyperframes", type=click.Choice(["hyperframes"]))
-@click.option("--html-model", default=None)
+@click.option("--html-model", default=None, help="Model name for HTML generation (overrides HTML_GEN_MODEL)")
 def render_cmd(shots: str, brand: str, mode: str, html_model: str):
     cfg = load_config()
     if html_model:
-        if html_model not in {"claude", "gpt4o"}:
-            raise click.BadParameter(f"'{html_model}' is not valid; choose 'claude' or 'gpt4o'", param_hint="--html-model")
         cfg.html_gen_model = html_model
-    shots_data = ShotsOutput.model_validate(json.loads(Path(shots).read_text()))
+    try:
+        shots_data = ShotsOutput.model_validate(json.loads(Path(shots).read_text()))
+    except Exception as exc:
+        click.echo(f"Error: could not load shots.json — {exc}", err=True)
+        sys.exit(1)
     brand_assets = _load_brand(brand)
-    output = render(shots_data, brand_assets, cfg)
+    try:
+        output = render(shots_data, brand_assets, cfg)
+    except ValueError as exc:
+        click.echo(f"Error: rendering failed — {exc}", err=True)
+        sys.exit(1)
     click.echo(f"Done: {output}")
 
 

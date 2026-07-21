@@ -1,22 +1,18 @@
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
-import anthropic
-import openai
-from clip_weave.schemas.shots import ShotsOutput
-from clip_weave.schemas.brand_assets import BrandAssets
+
+from openai import OpenAI
+
 from clip_weave.config import Config
+from clip_weave.schemas.brand_assets import BrandAssets
+from clip_weave.schemas.shots import ShotsOutput
+
+logger = logging.getLogger(__name__)
 
 _HTML_RE = re.compile(r"<html[\s>]", re.IGNORECASE)
 _MAX_RETRIES = 2
-
-
-def _get_claude_client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key)
-
-
-def _get_openai_client(api_key: str) -> openai.OpenAI:
-    return openai.OpenAI(api_key=api_key)
 
 
 def _build_prompt(shots: ShotsOutput, brand: BrandAssets) -> str:
@@ -48,21 +44,36 @@ Requirements:
 
 
 def _call_llm(prompt: str, cfg: Config) -> str:
-    if cfg.html_gen_model == "claude":
-        client = _get_claude_client(cfg.anthropic_api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+    if not cfg.html_gen_api_key:
+        logger.warning(
+            "HTML_GEN_API_KEY is empty — LLM call will fail. "
+            "Set HTML_GEN_API_KEY in .env"
         )
-        return response.content[0].text
-    client = _get_openai_client(cfg.openai_api_key)
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=4096,
+
+    client = OpenAI(
+        base_url=cfg.html_gen_base_url,
+        api_key=cfg.html_gen_api_key or "missing",
     )
-    return response.choices[0].message.content or ""
+
+    try:
+        response = client.chat.completions.create(
+            model=cfg.html_gen_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=8192,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as exc:
+        hint = ""
+        exc_lower = str(exc).lower()
+        if "auth" in exc_lower or "api key" in exc_lower or "401" in exc_lower:
+            hint = " — check HTML_GEN_API_KEY and HTML_GEN_BASE_URL in .env"
+        elif "model" in exc_lower or "404" in exc_lower:
+            hint = (
+                f" — check HTML_GEN_MODEL='{cfg.html_gen_model}' "
+                "is supported by your endpoint"
+            )
+        logger.error("HTML generation LLM call failed: %s%s", exc, hint)
+        raise ValueError(f"LLM call failed: {exc}{hint}") from exc
 
 
 def _is_valid_html(text: str) -> bool:
@@ -81,8 +92,17 @@ def generate_html(
         last_raw = _call_llm(prompt, cfg)
         if _is_valid_html(last_raw):
             return last_raw
+        logger.warning(
+            "HTML generation attempt %d/%d did not return valid HTML",
+            attempt + 1,
+            _MAX_RETRIES + 1,
+        )
     debug_dir = output_dir / "debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    (debug_dir / f"html_gen_raw_{ts}.txt").write_text(last_raw, encoding="utf-8")
-    raise ValueError(f"HTML generation failed after {_MAX_RETRIES + 1} attempts; raw saved to {debug_dir}")
+    debug_file = debug_dir / f"html_gen_raw_{ts}.txt"
+    debug_file.write_text(last_raw, encoding="utf-8")
+    raise ValueError(
+        f"HTML generation failed after {_MAX_RETRIES + 1} attempts; "
+        f"raw LLM output saved to {debug_file}"
+    )
