@@ -1,5 +1,20 @@
 # Byte-compiled files
 __pycache__/
 *.pyc
+
+# Virtual environment
 .venv/
+
+# Secrets
 .env
+
+# Runtime output
+output/
+
+# Process docs (plans, specs, SDD ledger — development scaffolding, not project code)
+docs/superpowers/
+.superpowers/
+
+# macOS
+.DS_Store
+**/.DS_Store
