@@ -36,7 +36,7 @@ def test_gemini(cfg) -> bool:
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-            max_tokens=16,
+            max_tokens=64,
         )
         reply = resp.choices[0].message.content or ""
         print(f"  [{_PASS}] Response: {reply!r}")
@@ -67,7 +67,7 @@ def test_claude(cfg) -> bool:
     try:
         resp = client.messages.create(
             model=model,
-            max_tokens=16,
+            max_tokens=64,
             messages=[{"role": "user", "content": "Reply with exactly: OK"}],
         )
         reply = resp.content[0].text
