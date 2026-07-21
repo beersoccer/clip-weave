@@ -1,15 +1,19 @@
-"""VideoAgent adapter — FFmpeg frame extraction + Gemini Flash analysis."""
+"""Video frame analyzer — FFmpeg scene detection + LLM multimodal analysis → ShotsOutput."""
 
 import base64
 import json
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
-import google.generativeai as genai
+from openai import OpenAI
 
+from clip_weave.config import Config
 from clip_weave.schemas.shots import ShotsOutput
+
+logger = logging.getLogger(__name__)
 
 _MAX_FRAMES = 20
 
@@ -64,7 +68,6 @@ def _extract_frames(
     frames_dir.mkdir(parents=True, exist_ok=True)
     output_pattern = str(frames_dir / "frame_%04d.jpg")
 
-    # Primary: scene-change based extraction
     result = subprocess.run(
         [
             "ffmpeg", "-y", "-i", video_path,
@@ -100,24 +103,21 @@ def _extract_frames(
             )
 
 
-def _load_frames_as_parts(frames_dir: Path) -> list[dict]:
-    """Load up to _MAX_FRAMES JPEGs from frames_dir as inline_data parts."""
+def _load_frames_as_messages(frames_dir: Path) -> list[dict]:
+    """Load up to _MAX_FRAMES JPEGs as OpenAI vision content parts."""
     frame_files = sorted(frames_dir.glob("frame_*.jpg"))[:_MAX_FRAMES]
     parts = []
     for frame_path in frame_files:
-        encoded = base64.b64encode(frame_path.read_bytes()).decode("utf-8")
+        b64 = base64.b64encode(frame_path.read_bytes()).decode("utf-8")
         parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": encoded,
-            }
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
         })
     return parts
 
 
 def _parse_response(text: str) -> dict:
-    """Extract JSON from Gemini response, handling markdown code blocks."""
-    # Strip ```json ... ``` or ``` ... ``` wrappers
+    """Extract JSON from LLM response, handling markdown code blocks."""
     match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if match:
         text = match.group(1)
@@ -127,7 +127,7 @@ def _parse_response(text: str) -> dict:
 def analyze_video(
     video_path: str,
     scene_threshold: float = 0.35,
-    gemini_api_key: str = "",
+    cfg: Config | None = None,
     frames_dir: Path = Path("output/frames"),
 ) -> ShotsOutput:
     """
@@ -135,45 +135,68 @@ def analyze_video(
 
     Steps:
     1. Extract frames via FFmpeg scene detection (fallback: fps=1).
-    2. Encode frames and send to Gemini Flash for structured analysis.
+    2. Encode frames and send to the configured LLM for structured analysis.
     3. Parse and validate the response against ShotsOutput schema.
     """
-    # Step 1: extract frames
     _extract_frames(video_path, scene_threshold, frames_dir)
 
-    # Step 2: load frames
-    frame_parts = _load_frames_as_parts(frames_dir)
+    frame_parts = _load_frames_as_messages(frames_dir)
     if not frame_parts:
         raise VideoAnalysisError(
             "No frames could be extracted from the video",
             stderr="Both scene-detection and fps=1 extraction produced zero frames",
         )
 
-    # Step 3: configure Gemini and send request
-    if gemini_api_key:
-        genai.configure(api_key=gemini_api_key)
+    api_key = cfg.video_analysis_api_key if cfg else ""
+    base_url = cfg.video_analysis_base_url if cfg else None
+    model = cfg.video_analysis_model if cfg else "gemini-2.0-flash-exp"
+
+    if not api_key:
+        logger.warning(
+            "VIDEO_ANALYSIS_API_KEY is empty — LLM call will fail. "
+            "Set VIDEO_ANALYSIS_API_KEY in .env"
+        )
+
+    client = OpenAI(base_url=base_url, api_key=api_key or "missing")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *frame_parts,
+                {"type": "text", "text": _ANALYSIS_PROMPT},
+            ],
+        }
+    ]
 
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
-        content = frame_parts + [{"text": _ANALYSIS_PROMPT}]
-        response = model.generate_content(content)
-        raw_text = response.text
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=4096,
+        )
+        raw_text = response.choices[0].message.content or ""
     except Exception as exc:
+        hint = ""
+        exc_lower = str(exc).lower()
+        if "auth" in exc_lower or "api key" in exc_lower or "401" in exc_lower:
+            hint = " — check VIDEO_ANALYSIS_API_KEY and VIDEO_ANALYSIS_BASE_URL in .env"
+        elif "model" in exc_lower or "404" in exc_lower:
+            hint = f" — check VIDEO_ANALYSIS_MODEL='{model}' is supported by your endpoint"
+        logger.error("LLM API call failed: %s%s", exc, hint)
         raise VideoAnalysisError(
-            f"Gemini API call failed: {exc}",
+            f"LLM API call failed: {exc}{hint}",
             raw_response="",
         ) from exc
 
-    # Step 4: parse JSON
     try:
         data = _parse_response(raw_text)
     except json.JSONDecodeError as exc:
         raise VideoAnalysisError(
-            "Gemini returned invalid JSON",
+            "LLM returned invalid JSON",
             raw_response=raw_text,
         ) from exc
 
-    # Step 5: validate against schema
     try:
         return ShotsOutput.model_validate(data)
     except Exception as exc:

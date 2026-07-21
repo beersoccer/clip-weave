@@ -3,13 +3,13 @@
 Exercises the full CLI path via CliRunner: __main__.py argument parsing,
 env-var loading via load_config(), and Click routing through `run`.
 
-Mocks all external API calls (Gemini, Claude) and subprocess calls (FFmpeg,
-HyperFrames).  Verifies that the `run` command produces a non-empty
+Mocks all external API calls (openai-compatible LLM) and subprocess calls
+(FFmpeg, HyperFrames).  Verifies that the `run` command produces a non-empty
 output/final.mp4 and writes shots.json.
 """
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -20,14 +20,26 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 TEST_VIDEO = FIXTURE_DIR / "test_5s.mp4"
 
 
+def _make_openai_mock(content: str) -> MagicMock:
+    """Return a mock OpenAI class whose instances return content from chat.completions.create."""
+    mock_message = MagicMock()
+    mock_message.content = content
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_response
+    mock_class = MagicMock(return_value=mock_client)
+    return mock_class
+
+
 @pytest.mark.skipif(not TEST_VIDEO.exists(), reason="test_5s.mp4 not generated")
 def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
     """Full CLI `run` command produces a non-empty mp4 and writes shots.json."""
 
-    # Change working directory to tmp_path so the default output/ dir lands there.
     monkeypatch.chdir(tmp_path)
 
-    # --- Gemini mock ---
     shots_json = json.dumps({
         "style": {
             "pacing": "fast",
@@ -53,29 +65,11 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
         "total_duration": 2.0,
         "shot_count": 1,
     })
-    mock_response = MagicMock()
-    mock_response.text = shots_json
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
 
-    # --- Unified subprocess mock ---
-    #
-    # Both adapters import `subprocess` and call `subprocess.run`.
-    # Patching via two different module paths
-    # (clip_weave.adapters.videoagent.subprocess.run and
-    #  clip_weave.adapters.hyperframes.subprocess.run) both resolve to
-    # setting the `run` attribute on the same shared subprocess module object.
-    # Nested patch() calls stack: the second patch saves the first mock as its
-    # "original" to restore on teardown, so during the `with` block only the
-    # second (innermost) mock is active.  Per-module patches are therefore NOT
-    # independent for attributes that live on a shared module object.
-    #
-    # The correct approach is a single patch at the canonical location that
-    # handles all callers, with a side_effect that discriminates by command:
-    #   - "ffmpeg" commands: write a fake JPEG frame so _load_frames_as_parts works
-    #   - everything else (hyperframes CLI): just return success
+    valid_html = "<html><body><div>Shot 1</div></body></html>"
+
+    # Single subprocess mock: writes a fake JPEG for ffmpeg frame extraction,
+    # succeeds silently for everything else (HyperFrames CLI, FFmpeg merge).
     def subprocess_side_effect(cmd, *args, **kwargs):
         cmd_str = " ".join(str(c) for c in cmd)
         if "ffmpeg" in cmd_str:
@@ -86,22 +80,17 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
                 (frames_dir / "frame_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    # --- Claude mock ---
-    valid_html = "<html><body><div>Shot 1</div></body></html>"
-    mock_llm_msg = MagicMock()
-    mock_llm_msg.content = [MagicMock(text=valid_html)]
-    mock_claude = MagicMock()
-    mock_claude.messages.create.return_value = mock_llm_msg
-
-    # --- Pre-create output mp4 (subprocess mock won't actually write it) ---
     output_dir = tmp_path / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     mp4_path = output_dir / "final.mp4"
     mp4_path.write_bytes(b"fake-mp4-content")
 
+    mock_analyzer_openai = _make_openai_mock(shots_json)
+    mock_html_gen_openai = _make_openai_mock(valid_html)
+
     with patch("subprocess.run", side_effect=subprocess_side_effect), \
-         patch("clip_weave.adapters.videoagent.genai", mock_genai), \
-         patch("clip_weave.core.html_generator._get_claude_client", return_value=mock_claude):
+         patch("clip_weave.adapters.video_analyzer.OpenAI", mock_analyzer_openai), \
+         patch("clip_weave.core.html_generator.OpenAI", mock_html_gen_openai):
 
         runner = CliRunner()
         result = runner.invoke(
@@ -113,9 +102,8 @@ def test_full_pipeline_produces_mp4(tmp_path, monkeypatch):
                 "--mode", "hyperframes",
             ],
             env={
-                "GEMINI_API_KEY": "test-key",
-                "OPENAI_API_KEY": "test-key",
-                "ANTHROPIC_API_KEY": "test-key",
+                "VIDEO_ANALYSIS_API_KEY": "test-key",
+                "HTML_GEN_API_KEY": "test-key",
                 "PEXELS_API_KEY": "test-key",
             },
             catch_exceptions=False,

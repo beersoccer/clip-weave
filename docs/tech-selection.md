@@ -193,27 +193,46 @@ ffmpeg -i sample.mp4 -q:a 0 -map a audio.mp3
 | InternVideo3 | ~3k | MIT | ★★★ | ★★ | ★★ | ★★★★ | 11/20 | ⚠️ 有 GPU 时 |
 | BroderQi/Storyboard | ~50 | - | ★★★★ | ★★★★ | ★★★★★ | ★★★ | 16/20 | ✅ 备选 |
 | **DeepScene** | ~80 | MIT | ★★★★★ | ★★★★★ | ★★★★★ | ★★★ | **18/20** | ✅ **Stage 1 首选** |
-| **VideoAgent** | 1.5k | MIT | ★★★★★ | ★★★★ | ★★★★ | ★★★★★ | **18/20** | ✅ **整体首选** |
+| **VideoAgent** | 1.5k | MIT | ★★★★★ | ★★★★ | ★★★★ | ★★★★★ | **18/20** | ⚠️ **接口不匹配（见注）** |
 
 **高 stars 项目（mmaction2 / SlowFast）不选的原因：** 输出是预定义动作分类标签（400 类），不能描述广告叙事结构；2022 年后停止维护；必须 GPU。
 
-**最终决策：** VideoAgent（HKUDS）作为 git submodule，覆盖理解+编辑+重制完整闭环。
+**最终决策：** 按 DeepScene 方式自行实现（FFmpeg 帧提取 + LLM 多模态分析），内置于 `adapters/video_analyzer.py`，无需引入外部库。
+
+> ⚠️ **VideoAgent 注：** VideoAgent 采用的技术路径（FFmpeg + Gemini 分析）与本项目一致，因此功能评分高。但其架构是交互式多 Agent 系统（入口为 `input("User Requirement:")`），无法以函数调用方式直接输出 shots.json，不适合作为 Python 库集成。Stage 2b（ViMax 路径）同样采用 HKUDS 生态，但 ViMax 是独立的生成框架，接口完全不同。
+
+#### 源码对比后的借鉴点
+
+对 DeepScene（shell 脚本）和 Storyboard（.NET 桌面 GUI）做了源码级分析，`video_analyzer.py` 在任务匹配度（内容感知场景检测 vs 均匀采样、营销专项 schema）和可嵌入性上均已超越两者。以下字段值得在后续阶段引入：
+
+**Phase 2b（ViMax 接入）时扩充到 `Shot` schema：**
+
+| 字段 | 来源 | 用途 |
+|---|---|---|
+| `reconstruction_prompt` | DeepScene | 每镜头的自然语言重创意描述，直接作为 ViMax/Kling prompt |
+| `uncertainties` | DeepScene | LLM 对该镜头分析不确定的项，用于人工审核和质量评估 |
+| `first_frame_prompt` | Storyboard | 首帧图像生成 prompt，供 Kling/Seedance 的 image2video 模式 |
+| `last_frame_prompt` | Storyboard | 末帧图像生成 prompt，控制镜头出点 |
+| `video_prompt` | Storyboard | 该镜头的视频生成 prompt（动作/摄影机运动综合描述） |
+| `camera_movement` | Storyboard | 摄影机运动方式（push in / pull out / pan / static 等） |
+
+**备用分析策略（复杂场景准确度提升）：** DeepScene 的两步法——先让 LLM 自由叙述每帧内容，再对叙述结果做结构化提取——对镜头内容复杂的视频比 clip-weave 当前的单步结构化调用更准确。可作为 `video_analyzer.py` 的 `--two-pass` 模式备选。
 
 ### 5.2 生成层 Pipeline：ViMax vs agentcut
 
-VideoAgent 输出**结构化富内容**（叙事结构 + shots + 角色 + 风格）。
+Stage 1 输出 `ShotsOutput`（结构化富内容：shots + style + narrative_structure）。Stage 2b 选哪个生成框架接收它？
 
-- **agentcut** 接口只接收单一 prompt（贫内容），VideoAgent 的分析大部分被丢弃
-- **ViMax `Script2Video`** 直接消费 screenplay 格式，与 VideoAgent 输出天然匹配，约 20 行格式转换代码即可对接
+- **agentcut** 接口只接收单一 prompt，ShotsOutput 大部分信息被丢弃，Director Agent 会从头重新规划
+- **ViMax `Script2Video`** 直接消费 screenplay 格式，ShotsOutput 可通过约 20 行胶水代码转换为 ViMax 入参，信息无损传递
 
-| 维度 | VideoAgent + ViMax | VideoAgent + agentcut |
+| 维度 | ShotsOutput + ViMax | ShotsOutput + agentcut |
 |---|---|---|
 | 接口匹配度 | ★★★★★ | ★★☆☆☆ |
 | 信息保留率 | 高 | 低（被重新覆盖） |
 | 角色/场景一致性 | ★★★★★ | ★★☆☆☆ |
 | MVP 速度 | 较慢 | **较快** |
 
-**结论：** 核心诉求是"参考样例 → 结构一致新视频"，VideoAgent + ViMax 是原生匹配。agentcut 适合允许 AI 自由发挥、2 天内跑通 MVP 的场景。
+**结论：** 核心诉求是"参考样例 → 结构一致新视频"，ShotsOutput + ViMax 是原生匹配。agentcut 适合允许 AI 自由发挥、2 天内跑通 MVP 的场景。
 
 ### 5.3 HTML→视频渲染引擎
 
