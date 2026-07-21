@@ -104,29 +104,44 @@ cp .env.example .env
 
 编辑 `.env`，填入密钥：
 
+**方式一：公司 AI 网关（两个 Stage 使用不同路径）**
+
 ```dotenv
-# 视频帧分析（Stage 1）
-VIDEO_ANALYSIS_BASE_URL=               # 公司 AI 网关 /v1 地址；留空则直连厂商
-VIDEO_ANALYSIS_API_KEY=your_key        # 必填
-VIDEO_ANALYSIS_MODEL=gemini-2.5-flash          # 可选，默认 gemini-2.5-flash
+# Stage 1 — Gemini，走网关 /vertex/v1（OpenAI-compatible 协议）
+VIDEO_ANALYSIS_BASE_URL=http://aigateway.example.com/vertex/v1
+VIDEO_ANALYSIS_API_KEY=your_gateway_token
+VIDEO_ANALYSIS_MODEL=gemini-3.5-flash       # 网关 Gemini 模型名
 
-# HTML 生成（Stage 2a）
-HTML_GEN_BASE_URL=                     # 同上，可与 Stage 1 使用同一网关
-HTML_GEN_API_KEY=your_key             # 必填
-HTML_GEN_MODEL=claude-sonnet-4-6      # 可选，默认 claude-sonnet-4-6
+# Stage 2a — Claude，走网关 /bedrock/v1（Anthropic Messages 协议）
+HTML_GEN_BASE_URL=http://aigateway.example.com/bedrock/v1
+HTML_GEN_API_KEY=your_gateway_token
+HTML_GEN_MODEL=global.anthropic.claude-sonnet-4-6  # 网关 Claude 模型名
 
-PEXELS_API_KEY=                        # 可选：缺失时跳过素材搜索
-SCENE_THRESHOLD=0.35                   # 可选：场景切变灵敏度，越小帧越多
+PEXELS_API_KEY=
+SCENE_THRESHOLD=0.35
 ```
 
-两处 `*_BASE_URL` 留空时直连厂商 API，填入公司 AI 网关地址时走网关代理，两处可独立配置。配置错误时程序会打印 `[WARNING]` 提示而不会崩溃。
+**方式二：直连厂商（无网关）**
+
+```dotenv
+VIDEO_ANALYSIS_BASE_URL=               # 留空 → 自动用 Gemini OpenAI-compatible 端点
+VIDEO_ANALYSIS_API_KEY=your_gemini_key
+VIDEO_ANALYSIS_MODEL=gemini-2.5-flash
+
+HTML_GEN_BASE_URL=                     # 留空 → 直连 Anthropic API
+HTML_GEN_API_KEY=your_anthropic_key
+HTML_GEN_MODEL=claude-sonnet-4-6
+
+PEXELS_API_KEY=
+SCENE_THRESHOLD=0.35
+```
+
+> **注意**：两个 Stage 的协议不同——Gemini 走 OpenAI-compatible `/chat/completions`，Claude 走 Anthropic Messages API `/messages`。配置错误时程序会打印 `[WARNING]` 提示而不会崩溃。
 
 **直连厂商时的密钥申请：**
-- `VIDEO_ANALYSIS_API_KEY`（默认模型 Gemini）：https://aistudio.google.com/apikey
-- `HTML_GEN_API_KEY`（默认模型 Claude）：https://console.anthropic.com/
+- `VIDEO_ANALYSIS_API_KEY`（Gemini）：https://aistudio.google.com/apikey
+- `HTML_GEN_API_KEY`（Claude）：https://console.anthropic.com/
 - `PEXELS_API_KEY`（可选）：https://www.pexels.com/api/
-
-使用公司 AI 网关时，两个 `API_KEY` 均填网关签发的 token，`BASE_URL` 填网关地址。
 
 ### 第四步：准备样例视频
 
