@@ -1,6 +1,6 @@
 # clip-weave 技术选型分析
 
-> 文档版本：v4.0 | 更新日期：2026-07-23  
+> 文档版本：v6.0 | 更新日期：2026-07-27  
 > 最终架构方案见 `architecture.md`
 
 ---
@@ -37,14 +37,14 @@
 
 ## 2. 三阶段方案总览
 
-| | Phase 1（当前）| Phase 2（验证）| Phase 3（远期）|
+| | Phase 1（v6.0，当前）| Phase 2（验证）| Phase 3（远期）|
 |---|---|---|---|
-| **输入** | 模板 + 品牌素材 | 品牌素材 + Kling API | 品牌素材 + ViMax |
-| **核心技术** | HF 模板填充 + 工作流增强 | HF 故事线 + 文生视频 + FFmpeg | HF + ViMax screenplay |
+| **输入** | 用户对话 / URL / 本地文件 / BRIEF.md | 品牌素材 + Kling API | 品牌素材 + ViMax |
+| **核心技术** | clip-weave 前置门面（Intent Router + Asset Matcher + Rule Guard）+ HF 全链路 | HF 故事线 + 文生视频 + FFmpeg | HF + ViMax screenplay |
 | **输出风格** | Motion Graphics（动效图形）| 动效 + 写实混合 | 全 AI 真实影像 |
 | **成本/视频** | ~$0.05 | ~$1–5 | ~$5–15 |
 | **制作时间** | 30–60 分钟 | 30–60 分钟 | 20–40 分钟 |
-| **状态** | ✅ 当前重点 | 🔲 验证目标 | 🔲 远期规划 |
+| **状态** | ✅ 已完成（P0–P2 全部交付）| 🔲 验证目标 | 🔲 远期规划 |
 
 ---
 
@@ -67,12 +67,12 @@
 
 基于 xiaomi-su7 项目的实践总结（`docs/xiaomi-su7-video-production.md` §三）：
 
-| 问题 | 根因 | 对策 |
+| 问题 | 根因 | 对策（v6.0 实现）|
 |------|------|------|
-| 30min/composition + 多轮 lint | 框架规则密集，LLM 每次需重读 | 规则预注入生成 prompt；模板骨架填充而非空白生成 |
-| 素材利用率低（134 张用 2 张）| 无结构化素材输入，LLM 随机选 | 用户提供 ASSET_MANIFEST.md |
-| 已修复错误重现 | 长会话上下文压缩，规则细节丢失 | 将高频规则写入模板的 RULES.md |
-| 媒体文件无法在子合成中使用 | `media_in_subcomposition` 规则 | 视频/音频只放 index.html；子合成只含图形层 |
+| 30min/composition + 多轮 lint | 框架规则密集，LLM 每次需重读 | **Rule Guard** Python 预检（<1s）拦截已知错误，Fix Registry 确定性修复，0 LLM token |
+| 素材利用率低（134 张用 2 张）| 无结构化素材输入，LLM 随机选 | **Asset Matcher** Gemini embedding 向量匹配，为每个 beat 填充 top-5 候选 |
+| 已修复错误重现 | 长会话上下文压缩，规则细节丢失 | Rule Guard 每次从磁盘重新加载规则，不依赖 LLM 记忆；修复历史持久化到 `.clip-weave/guard-history.json` |
+| 媒体文件无法在子合成中使用 | `media_in_subcomposition` 规则 | Rule Guard 自动检测并报告；视频/音频只放 index.html |
 
 ### 3.3 关键框架规则（影响生成质量）
 
@@ -88,6 +88,9 @@ preserve-3d + filter       → 有 transform-style:preserve-3d 的元素祖先�
 ---
 
 ## 4. 模板库：hyperframes-launches
+
+> **v6.0 变更**：`vendors/hyperframes-launches` 已从本 repo 移出（减小 clone 体积）。  
+> 参考实现位于 `~/workspace/hyperframes-launches`，也可直接访问 https://github.com/heygen-com/hyperframes-launches。
 
 **heygen-com/hyperframes-launches** 是 HyperFrames 官方生产级模板集合，每套均通过 CI 验证。
 

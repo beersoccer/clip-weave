@@ -1,355 +1,229 @@
 # clip-weave
 
-AI 驱动的营销视频自动生成工具。输入样例视频 + 品牌素材，自动分析视频结构并生成风格一致的新营销视频。
+> HyperFrames 前置门面 — 意图路由、素材匹配、规则守卫
+>
+> v6.0 | 分支：`feat/v6-hf-frontdoor`
 
-## 当前状态
+clip-weave 不重造 HF 已有能力，只补三件事：
 
-| 阶段 | 状态 | 说明 |
-|------|------|------|
-| Phase 1：视频理解 | ✅ 完成 | FFmpeg 帧提取 + LLM 多模态分析（可配置）→ shots.json |
-| Phase 2a：HyperFrames 路径 | ✅ 完成 | shots.json → HTML/CSS/GSAP → MP4 |
-| Phase 2b：ViMax 路径 | 🔲 待开发 | AI 真实影像生成 |
-| Phase 3：质量提升 | 🔲 待开发 | 模板库、多比例输出 |
-| Phase 4：工程化 | 🔲 待开发 | Docker、批量处理 |
+| 模块 | 职责 |
+|------|------|
+| **Intent Router** | 用户对话 / BRIEF.md 模板 / CLI → 选 HF workflow，写 BRIEF.md |
+| **Asset Matcher** | `capture/extracted/asset-descriptions.md` → Gemini 向量匹配 → 为每个 beat 填充 `asset_candidates` |
+| **Rule Guard** | 生成后 `npx check` 前确定性扫描 4 条 HF 特有规则；已知错误 Python 直接修复（0 token） |
 
-## 架构
-
-```
-样例视频 + 品牌素材
-       │
-       ▼
-Stage 1: 视频理解（FFmpeg 自适应多标准帧提取 + LLM 多模态分析）
-       → output/shots.json（镜头结构 + 风格信息）
-       │
-       ▼
-Stage 2a: HTML 生成（LLM，由 HTML_GEN_MODEL 配置）
-       → HTML/CSS/GSAP 动效代码
-       + Pexels 素材自动检索（可选）
-       │
-       ▼
-Stage 3: HyperFrames 渲染（npx hyperframes render）
-       → Headless Chromium 逐帧截图 → FFmpeg 合并 → output/final.mp4
-```
+HF 本身负责 storyboard 生成、composition 编写、lint / check / render 全链路。
 
 ---
 
 ## 前置依赖
 
-运行前需确认以下工具已安装并可在终端访问：
-
-### 1. Python 3.11+（通过 uv 管理）
-
-```bash
-# 安装 uv（若未安装）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 验证
-uv --version
-```
-
-### 2. FFmpeg + ffprobe
-
-视频帧提取的核心依赖，**必须安装**。`ffprobe`（探测视频时长）随 FFmpeg 一起打包，安装 FFmpeg 即可。
-
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# 验证（两个命令均需可用）
-ffmpeg -version
-ffprobe -version
-```
-
-### 3. Node.js 18+（含 npm）
-
-HyperFrames 渲染通过 `npx` 调用，需要 Node.js 和 npm。
-
-```bash
-# macOS（推荐通过 nvm 或 brew）
-brew install node
-
-# 验证
-node --version   # 需要 >= 18
-npm --version
-```
+| 工具 | 版本 | 安装 |
+|------|------|------|
+| Node.js | ≥ 18 | `brew install node` |
+| HyperFrames CLI | 最新 | `npm install -g hyperframes` |
+| Python | 3.11+ | 通过 uv 管理 |
+| Claude Code | 最新 | https://claude.ai/code |
 
 ---
 
 ## 快速开始
 
-### 第一步：克隆项目
+### 方式一：Claude Code 技能（推荐）
+
+**第一步：安装 clip-weave 技能**
 
 ```bash
-git clone --recurse-submodules https://github.com/beersoccer/clip-weave.git
+# 克隆项目
+git clone https://github.com/beersoccer/clip-weave.git
 cd clip-weave
+
+# 安装 Python 依赖
+uv sync
+
+# 配置 API 密钥
+cp .env.example .env    # 填入 GEMINI_API_KEY（必须）
 ```
 
-> `--recurse-submodules` 会同时初始化 `vendors/hyperframes`（渲染参考实现）。
-
-### 第二步：安装 Python 依赖
+**第二步：将技能注册到 Claude Code**
 
 ```bash
-uv sync
+# 将 skills/clip-weave/ 复制到 Claude Code 技能目录
+cp -r skills/clip-weave ~/.claude/plugins/
 ```
 
-uv 会自动读取 `.python-version`（3.11.12）并创建 `.venv`。
+或在 claude.ai 中使用 `/skills add` 安装（需要 HF CLI 已全局安装）。
 
-### 第三步：配置 API 密钥
+**第三步：在 Claude Code 中使用**
+
+```
+/clip-weave
+```
+
+clip-weave 技能会引导你完成意图确认、素材来源配置，然后委托 HF workflow 执行。
+
+---
+
+### 方式二：CLI
+
+```bash
+# 最简调用（纯文字描述）
+python -m clip_weave run \
+  --message "小米SU7 品牌发布视频" \
+  --project su7-launch
+
+# 指定网站 URL（自动 capture）
+python -m clip_weave run \
+  --url "https://xiaomiev.com/su7" \
+  --message "好看·好开·舒适·安全" \
+  --project su7-launch \
+  --length 30s
+
+# Rule Guard 扫描（在 HF check 之前运行）
+python -m clip_weave guard videos/su7-launch
+
+# Asset Matcher 单独调用
+python -m clip_weave match-assets videos/su7-launch \
+  --query "驾驶舱内饰特写"
+```
+
+---
+
+## 配置
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，填入密钥：
+| 环境变量 | 必须 | 说明 |
+|---------|------|------|
+| `GEMINI_API_KEY` | ✅ | Gemini embedding（Asset Matcher）；HF capture 也使用此 key |
+| `OPENAI_API_KEY` | 可选 | 预留，当前未使用 |
+| `HEYGEN_API_KEY` | 可选 | TTS 路径（P3） |
+| `FIGMA_TOKEN` | 可选 | Figma 输入路径 |
 
-**方式一：公司 AI 网关（两个 Stage 使用不同路径）**
+或使用项目根目录的 `config.yaml`（env var 优先）：
 
-```dotenv
-# Stage 1 — Gemini，走网关 /vertex/v1（OpenAI-compatible 协议）
-VIDEO_ANALYSIS_BASE_URL=http://aigateway.example.com/vertex/v1
-VIDEO_ANALYSIS_API_KEY=your_gateway_token
-VIDEO_ANALYSIS_MODEL=gemini-3.5-flash       # 网关 Gemini 模型名
-
-# Stage 2a — Claude，走网关 /bedrock/v1（Anthropic Messages 协议）
-HTML_GEN_BASE_URL=http://aigateway.example.com/bedrock/v1
-HTML_GEN_API_KEY=your_gateway_token
-HTML_GEN_MODEL=global.anthropic.claude-sonnet-4-6  # 网关 Claude 模型名
-
-PEXELS_API_KEY=
-SCENE_THRESHOLD=0.35
+```yaml
+providers:
+  embedding: gemini   # gemini（当前唯一实现）
+  vision: gemini
+  tts: heygen
 ```
-
-**方式二：直连厂商（无网关）**
-
-```dotenv
-VIDEO_ANALYSIS_BASE_URL=               # 留空 → 自动用 Gemini OpenAI-compatible 端点
-VIDEO_ANALYSIS_API_KEY=your_gemini_key
-VIDEO_ANALYSIS_MODEL=gemini-2.5-flash
-
-HTML_GEN_BASE_URL=                     # 留空 → 直连 Anthropic API
-HTML_GEN_API_KEY=your_anthropic_key
-HTML_GEN_MODEL=claude-sonnet-4-6
-
-PEXELS_API_KEY=
-SCENE_THRESHOLD=0.35
-```
-
-> **注意**：两个 Stage 的协议不同——Gemini 走 OpenAI-compatible `/chat/completions`，Claude 走 Anthropic Messages API `/messages`。配置错误时程序会打印 `[WARNING]` 提示而不会崩溃。
-
-**直连厂商时的密钥申请：**
-- `VIDEO_ANALYSIS_API_KEY`（Gemini）：https://aistudio.google.com/apikey
-- `HTML_GEN_API_KEY`（Claude）：https://console.anthropic.com/
-- `PEXELS_API_KEY`（可选）：https://www.pexels.com/api/
-
-### 第四步：准备样例视频
-
-将一段 MP4/MOV 视频（建议 30s 以内）放到任意路径，例如 `assets/sample.mp4`。
-
-#### 从 YouTube 下载（使用 yt-dlp）
-
-```bash
-# 安装 yt-dlp（macOS）
-brew install yt-dlp
-
-# 下载为 mp4，720p（推荐：分析阶段帧会缩至 512px 宽，1080p 无额外收益）
-yt-dlp --cookies-from-browser chrome \
-  -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
-  --merge-output-format mp4 \
-  -o "assets/sample.mp4" \
-  "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-> `--cookies-from-browser chrome`：使用 Chrome 登录态绕过 YouTube 机器人验证，需提前在 Chrome 中登录 YouTube。  
-> 若使用 Safari 或 Firefox，将 `chrome` 替换为 `safari` / `firefox`。
-
-**常用变体：**
-
-```bash
-# 直接保存到 output 目录
-yt-dlp --cookies-from-browser chrome \
-  -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
-  --merge-output-format mp4 \
-  -o "output/input.mp4" \
-  "https://www.youtube.com/watch?v=VIDEO_ID"
-
-# 查看该视频的所有可用格式（再决定下载哪个）
-yt-dlp --cookies-from-browser chrome -F "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-### 第五步：验证分析阶段（Stage 1）
-
-先单独跑分析，确认 FFmpeg 和 LLM 接口配置正常，再做完整渲染：
-
-```bash
-uv run python -m clip_weave analyze \
-  --video assets/sample.mp4 \
-  --output output/shots.json
-```
-
-成功输出示例：
-```
-Analysis complete: output/shots.json (6 shots)
-```
-
-查看 `output/shots.json` 确认结构化镜头数据已生成。
-
-### 第六步：完整流程（分析 + 渲染）
-
-```bash
-uv run python -m clip_weave run \
-  --video assets/sample.mp4 \
-  --brand assets/brand
-```
-
-生成结果：`output/final.mp4`
 
 ---
 
-## 品牌素材配置
+## 项目结构（v6.0）
 
-`--brand` 指向品牌目录，目录下可放 `brand_assets.json`（`brand_name` 必填，其余可选）：
-
-```json
-{
-  "brand_name": "MyBrand",
-  "tagline": "品牌口号",
-  "logo_path": "assets/brand/logo.png",
-  "color_palette": ["#FF6B35", "#2C3E50"],
-  "copy_points": ["核心卖点一", "核心卖点二"],
-  "target_aspect_ratio": "9:16"
-}
 ```
-
-若目录下无 `brand_assets.json`，则以目录名作为 `brand_name` 自动创建最简品牌配置。
-
----
-
-## CLI 命令参考
-
-### `analyze` — 仅分析视频
-
-```bash
-uv run python -m clip_weave analyze \
-  --video <视频路径> \
-  --output <shots.json 输出路径，默认 output/shots.json>
+clip-weave/
+├── config.yaml                     # Provider 配置（可选，env var 优先）
+├── .env.example                    # 环境变量示例
+├── src/clip_weave/
+│   ├── pipeline.py                 # 顶层编排：Intent → Factory → Delegate → Guard
+│   ├── config.py                   # 配置加载（env + config.yaml）
+│   ├── adapters/
+│   │   ├── hyperframes.py          # HF CLI 封装（init / capture / lint / check / render）
+│   │   ├── rule_guard.py           # 规则守卫 + Fix Registry（4 条 HF 高频规则）
+│   │   └── asset_matcher.py        # Gemini embedding 素材匹配
+│   └── core/
+│       ├── intent_router.py        # 用户输入 → workflow + BRIEF.md
+│       ├── project_factory.py      # HF 项目初始化（init / capture / 文件暂存）
+│       └── delegator.py            # 委托指令生成
+├── skills/
+│   └── clip-weave/
+│       ├── SKILL.md                # 入口技能（意图引导 + HF 委托）
+│       └── references/
+│           ├── brief-template.md   # BRIEF.md 可离线填写模板
+│           ├── setup.md            # API Key 配置指南
+│           └── input-guide.md      # 4 种输入方式详解
+├── videos/                         # 每个项目工作目录（HF 标准结构）
+│   └── <project-name>/
+│       ├── BRIEF.md                # HF 标准 frontmatter
+│       ├── capture/                # HF capture 产出（素材 + tokens + descriptions）
+│       ├── compositions/           # HF compositions（Rule Guard 在此目录扫描）
+│       └── renders/
+├── tests/                          # 29 个单元测试
+└── docs/
+    ├── architecture.md             # v6.0 架构方案（权威文档）
+    ├── hyperframes-analysis.md     # HF 能力分析
+    └── tech-selection.md           # 技术选型历史
 ```
-
-### `run` — 完整流程（分析 + 渲染）
-
-```bash
-uv run python -m clip_weave run \
-  --video <视频路径> \
-  --brand <品牌目录> \
-  [--mode hyperframes]          # 目前仅支持 hyperframes
-  [--html-model <模型名>]        # 覆盖 HTML_GEN_MODEL 环境变量
-```
-
-### `render` — 仅渲染（从已有 shots.json）
-
-```bash
-uv run python -m clip_weave render \
-  --shots output/shots.json \
-  --brand assets/brand \
-  [--html-model <模型名>]
-```
-
-适用场景：已有分析结果，只想调整品牌或重新渲染。
-
----
-
-## 输出文件
-
-| 文件 | 说明 |
-|------|------|
-| `output/shots.json` | 结构化镜头分析（shot 列表、风格信息、叙事结构） |
-| `output/compositions/index.html` | 生成的 HTML/CSS/GSAP 动效源码 |
-| `output/final.mp4` | 最终渲染视频 |
-| `output/frames/` | FFmpeg 自适应提取的关键帧（中间产物，≤40 帧） |
 
 ---
 
 ## 开发与测试
 
 ```bash
-# 运行所有单元测试
+# 运行所有测试（29 个，全部通过）
 uv run pytest
 
-# 生成 E2E 测试用的 5s 测试视频（需要 FFmpeg）
-uv run python tests/fixtures/make_test_video.py
+# 指定测试模块
+uv run pytest tests/test_pipeline.py -v
+uv run pytest tests/test_cli.py -v
 
-# 运行 E2E 集成测试（模拟全链路，mock 外部 API）
-uv run pytest tests/test_e2e.py -v
+# 查看覆盖情况
+uv run pytest --tb=short
+```
+
+**测试覆盖：**
+
+| 测试文件 | 覆盖范围 |
+|---------|---------|
+| `test_config.py` (8) | Config 加载、env var 优先级、has_embedding |
+| `test_hyperframes_adapter.py` (8) | HF CLI 封装（init/capture/lint/check/render）|
+| `test_pipeline.py` (8) | 完整 pipeline、BRIEF.md resume、--length 传递、GSAP fixer 回归 |
+| `test_cli.py` (5) | CLI 命令（run / guard / match-assets）|
+
+---
+
+## CLI 命令参考
+
+### `run` — 路由意图并生成 HF 项目
+
+```bash
+python -m clip_weave run \
+  [--url URL]             # 网站 URL（自动 capture）
+  --message TEXT          # 核心消息（必须）
+  [--project NAME]        # 项目名（默认从 URL/消息推导）
+  [--videos-dir PATH]     # 项目根目录（默认 videos/）
+  [--length DURATION]     # 视频时长，如 15s 30s 60s（默认 30s）
+  [--workflow NAME]       # 强制指定 HF workflow
+```
+
+若 `videos/<project>/BRIEF.md` 已存在，跳过意图路由直接委托 HF（§4.1.1 resume 路径）。
+
+### `guard` — Rule Guard 预检
+
+```bash
+python -m clip_weave guard <project_dir>
+# 示例：python -m clip_weave guard videos/su7-launch
+```
+
+在 `npx hyperframes check` 之前运行，检查 4 条 HF 特有规则；已知模式 Python 直接修复（0 LLM token）。
+
+### `match-assets` — Asset Matcher 单次调用
+
+```bash
+python -m clip_weave match-assets <project_dir> [--query TEXT]
 ```
 
 ---
 
-## 成本参考（单个 30s 视频）
+## 实施路线图
 
-| 路径 | 约成本 | 输出类型 |
-|------|--------|---------|
-| HyperFrames（当前） | ~$0.05–0.08 | Motion Graphics 动效 |
-| ViMax（待开发） | ~$0.50–1.10 | AI 真实影像 |
-
----
-
-## 常见问题
-
-**Q: `yt-dlp: Sign in to confirm you're not a bot`**  
-A: YouTube 需要验证身份。在 Chrome/Safari/Firefox 中登录 YouTube，然后加上 `--cookies-from-browser chrome`（或对应浏览器名）重试。
-
-**Q: `ffmpeg: command not found`**  
-A: 参考上方"前置依赖"中的 FFmpeg 安装步骤。
-
-**Q: `Error: Cannot find module 'hyperframes'` 或 npx 超时**  
-A: 首次运行 `npx hyperframes render` 时 npm 会自动下载，需要网络访问 registry.npmjs.org。也可预先安装：`npm install -g hyperframes`。
-
-**Q: `VideoAnalysisError: LLM API call failed`**  
-A: 检查 `.env` 中 `VIDEO_ANALYSIS_API_KEY` 是否正确；若使用网关，确认 `VIDEO_ANALYSIS_BASE_URL` 可访问且模型名称（`VIDEO_ANALYSIS_MODEL`）被该网关支持。启动时终端会打印 `[WARNING]` 提示具体缺失项。
-
-**Q: shots.json 中 `shot_count: 0` 或分析结果与视频内容不符**  
-A: 新的自适应算法同时使用场景切变 + 时间间隔双重保证，即使是静态或慢节奏视频也能提取足够帧。若结果仍不理想，可尝试降低 `SCENE_THRESHOLD`（如 `0.2`）提高场景切变灵敏度，或增大 `SCENE_THRESHOLD`（如 `0.5`）减少快剪视频的重复帧。
-
-**Q: 提取的帧数过多或过少**  
-A: 帧数由视频时长自动决定：`目标帧数 = max(3, min(40, 时长秒 / 2.5))`。30s 视频约提取 12 帧，60s 约 24 帧，上限 40 帧（防止超出 LLM 上下文）。
-
-**Q: 不填 `PEXELS_API_KEY` 会怎样**  
-A: 跳过素材搜索，HTML 中使用占位内容，不影响视频渲染。
-
----
-
-## 项目结构
-
-```
-clip-weave/
-├── src/clip_weave/
-│   ├── __main__.py          # CLI（analyze / run / render）
-│   ├── pipeline.py          # 流程编排
-│   ├── config.py            # 环境变量加载
-│   ├── adapters/
-│   │   ├── video_analyzer.py  # FFmpeg + LLM 视频帧分析
-│   │   └── hyperframes.py     # npx hyperframes 渲染封装
-│   ├── core/
-│   │   ├── html_generator.py  # LLM → HTML/CSS/GSAP
-│   │   └── asset_resolver.py  # Pexels 素材检索
-│   └── schemas/
-│       ├── shots.py         # ShotsOutput / Shot / StyleInfo
-│       └── brand_assets.py  # BrandAssets
-├── vendors/
-│   └── hyperframes/         # git submodule（heygen-com/hyperframes）
-├── assets/brand/            # 品牌素材（gitignored）
-├── output/                  # 生成结果（gitignored）
-├── tests/
-├── docs/
-├── pyproject.toml
-└── .env.example
-```
+| 阶段 | 状态 | 内容 |
+|------|------|------|
+| **P0** Intent Router + BRIEF.md + skills/clip-weave/ | ✅ 完成 | 已实现并测试 |
+| **P1** Rule Guard + Fix Registry | ✅ 完成 | 4 条规则 + 4 条确定性修复 |
+| **P2** Asset Matcher | ✅ 完成 | Gemini embedding + top-K + 缓存 |
+| **P3** Kling 写实镜头混合 | 🔲 待验证 | `adapters/kling.py`（规划中）|
+| **P4** ViMax 全 AI 真实影像 | 🔲 远期 | P3 验证后启动 |
 
 ---
 
 ## 文档
 
-- [架构方案与实施路径](docs/architecture.md)
-- [技术选型分析](docs/tech-selection.md)
+- [架构方案](docs/architecture.md) — 权威设计文档（v6.0）
+- [HyperFrames 能力分析](docs/hyperframes-analysis.md)
+- [技术选型历史](docs/tech-selection.md)
