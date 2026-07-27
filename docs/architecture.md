@@ -1,6 +1,6 @@
 # clip-weave 架构方案
 
-> 文档版本：v6.0 | 更新日期：2026-07-24
+> 文档版本：v6.0 | 更新日期：2026-07-27
 > HF 能力分析见 `hyperframes-analysis.md`；技术选型见 `tech-selection.md`
 
 ---
@@ -285,17 +285,20 @@ clip-weave/
 └── docs/
 ```
 
-**安装为 agent skills：**
+**安装为 Claude Code skills：**
 
 ```bash
-# 方式一：通过 skills CLI 安装（推荐）
-npx skills add <your-org>/clip-weave --full-depth
+# 项目本地安装（仅在该工作目录下可用，推荐）
+cp -r skills/clip-weave .claude/skills/clip-weave
 
-# 方式二：直接复制 skills/ 目录到 agent workspace
-cp -r skills/clip-weave ~/.hyperframes/skills/
+# 全局安装（所有项目均可用）
+cp -r skills/clip-weave ~/.claude/skills/clip-weave
+
+# 符号链接（开发调试，修改即时生效）
+ln -sf "$(pwd)/skills/clip-weave" .claude/skills/clip-weave
 ```
 
-安装后，在 Claude 对话中输入 `/clip-weave` 即可激活意图引导流程。
+重启 Claude Code 后，在对话中输入 `/clip-weave` 即可激活意图引导流程。
 
 **相比 v5.0 移除：**
 - `templates/` 目录 —— HF registry + skills 已含预制模板
@@ -325,13 +328,13 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 
 | 阶段 | 目标 | 核心交付 | 状态 |
 |------|------|---------|------|
-| **P0** | 打通链路：意图 → HF autonomous 执行 | Intent Router；BRIEF.md 生成器；Project Factory（`init` + `capture` 封装）；Delegator；`skills/clip-weave/` 入口 skill（可 `npx skills add` 安装） | 🔲 实施中 |
-| **P1** | **解决 lint 痛点（当前最高优）** | 4 条 HF 高频规则的 Python AST 检测器；4 条规则的 Fix Registry 确定性 fixer；修复历史签名追踪；增量 check 集成 | 🔲 待启动 |
-| **P2** | 提升素材利用率 | Asset Matcher（embedding + top-K 检索）；STORYBOARD `asset_candidates` 填充；embedding 缓存 | 🔲 待启动 |
+| **P0** | 打通链路：意图 → HF autonomous 执行 | Intent Router；BRIEF.md 生成器；Project Factory（`init` + `capture` 封装）；Delegator；`skills/clip-weave/` 入口 skill | ✅ 完成 |
+| **P1** | 解决 lint 痛点 | 4 条 HF 高频规则检测器；4 条确定性 fixer；修复历史签名追踪 | ✅ 完成 |
+| **P2** | 提升素材利用率 | Asset Matcher（Gemini embedding + top-K 检索）；embedding 缓存 | ✅ 完成 |
 | **P3** | 写实镜头混合路径 | Kling image-to-video 封装；FFmpeg 合流；STORYBOARD `visual_type` 路由 | 🔲 待验证 |
 | **P4** | ViMax 全 AI 真实影像（可选） | `adapters/vimax.py`；screenplay 转换 | 🔲 P3 验证后 |
 
-**P1 是最高优先级**：lint 循环是用户体验最大痛点，Rule Guard + Fix Registry 是能立刻见效的杠杆，且不依赖 P0 全量完成即可独立验证。
+**当前状态**：P0–P2 全部交付，29 个测试通过。P3 是下一个里程碑。
 
 ---
 

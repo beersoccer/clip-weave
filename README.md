@@ -48,19 +48,34 @@ cp .env.example .env    # 填入 GEMINI_API_KEY（必须）
 **第二步：将技能注册到 Claude Code**
 
 ```bash
-# 将 skills/clip-weave/ 复制到 Claude Code 技能目录
-cp -r skills/clip-weave ~/.claude/plugins/
+# 方式 A：项目本地安装（仅在该项目工作目录下可用，推荐）
+cp -r skills/clip-weave .claude/skills/clip-weave
+
+# 方式 B：全局安装（所有项目均可用）
+cp -r skills/clip-weave ~/.claude/skills/clip-weave
+
+# 方式 C：符号链接（开发调试时推荐，修改即时生效）
+ln -sf "$(pwd)/skills/clip-weave" .claude/skills/clip-weave
 ```
 
-或在 claude.ai 中使用 `/skills add` 安装（需要 HF CLI 已全局安装）。
+重启 Claude Code 后技能自动加载。
 
-**第三步：在 Claude Code 中使用**
+**第三步：验证安装**
+
+```bash
+# 确认 Python 入口可用
+uv run python -m clip_weave --help
+# 应看到：run / guard / match-assets 三个子命令
+```
+
+**第四步：在 Claude Code 中使用**
 
 ```
 /clip-weave
+> 帮我做个 30 秒的小米 SU7 品牌视频，用 https://xiaomiev.com/su7 的素材
 ```
 
-clip-weave 技能会引导你完成意图确认、素材来源配置，然后委托 HF workflow 执行。
+clip-weave 技能会完成意图引导（5 步对话）→ 生成 BRIEF.md → 打印 HF workflow 委托指令。
 
 ---
 
@@ -174,6 +189,30 @@ uv run pytest --tb=short
 | `test_hyperframes_adapter.py` (8) | HF CLI 封装（init/capture/lint/check/render）|
 | `test_pipeline.py` (8) | 完整 pipeline、BRIEF.md resume、--length 传递、GSAP fixer 回归 |
 | `test_cli.py` (5) | CLI 命令（run / guard / match-assets）|
+
+**E2E 烟测（不需要任何 API key）：**
+
+```bash
+# 1. 验证意图路由：纯文字 → BRIEF.md
+uv run python -m clip_weave run \
+  --message "小米SU7 品牌视频" \
+  --project smoke-test
+cat videos/smoke-test/BRIEF.md
+# 预期：包含 workflow: product-launch-video 或 faceless-explainer
+
+# 2. 验证 Rule Guard：检测 media_in_subcomposition
+mkdir -p videos/smoke-test/compositions
+printf '<html><body><video src="x.mp4"></video></body></html>' \
+  > videos/smoke-test/compositions/01.html
+uv run python -m clip_weave guard videos/smoke-test
+# 预期：exit code 1，输出 "violations need attention"
+
+# 3. 验证 BRIEF.md resume 路径（已有 BRIEF.md 时跳过意图路由）
+uv run python -m clip_weave run \
+  --message "任意输入" \
+  --project smoke-test
+# 预期：直接打印委托指令，不重写 BRIEF.md
+```
 
 ---
 
