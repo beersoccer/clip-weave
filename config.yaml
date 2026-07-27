@@ -1,0 +1,9 @@
+# clip-weave provider configuration
+# This file is optional. Environment variables take precedence over values here.
+# Keys (GEMINI_API_KEY, OPENAI_API_KEY, etc.) must be set as environment variables, not here.
+# See skills/clip-weave/references/setup.md for full setup guide.
+
+providers:
+  embedding: gemini    # gemini | openai | local — used by Asset Matcher
+  vision: gemini       # gemini | openai — used for asset-descriptions fallback
+  tts: heygen          # heygen | kokoro — used for TTS voice generation

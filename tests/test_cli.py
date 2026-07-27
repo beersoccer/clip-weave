@@ -1,59 +1,62 @@
-import json
+"""Tests for the v6.0 CLI: run, guard, match-assets."""
+
 from pathlib import Path
 from unittest.mock import patch
 from click.testing import CliRunner
 from clip_weave.__main__ import cli
-from clip_weave.schemas.shots import ShotsOutput
-from clip_weave.schemas.brand_assets import BrandAssets
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
-SHOTS = ShotsOutput.model_validate(json.loads((FIXTURE_DIR / "shots.json").read_text()))
-BRAND = BrandAssets.model_validate(json.loads((FIXTURE_DIR / "brand_assets.json").read_text()))
 
 
-def test_analyze_command(tmp_path):
-    fake_video = tmp_path / "test.mp4"
-    fake_video.write_bytes(b"fake")
-    out_file = tmp_path / "shots.json"
+def test_run_command_creates_project(tmp_path):
     runner = CliRunner()
-    with patch("clip_weave.__main__.analyze", return_value=SHOTS) as mock_analyze:
+    with patch("clip_weave.__main__.pipeline_run", return_value=tmp_path / "videos" / "proj") as mock_run:
         result = runner.invoke(cli, [
-            "analyze", "--video", str(fake_video), "--output", str(out_file)
+            "run",
+            "--message", "小米SU7品牌视频",
+            "--project", "su7-test",
+            "--videos-dir", str(tmp_path / "videos"),
         ])
     assert result.exit_code == 0, result.output
-    mock_analyze.assert_called_once()
+    mock_run.assert_called_once()
+    kwargs = mock_run.call_args[1]
+    assert kwargs["project_name"] == "su7-test"
+    assert "小米SU7品牌视频" in kwargs["message"]
 
 
-def test_run_command(tmp_path):
-    fake_video = tmp_path / "test.mp4"
-    fake_video.write_bytes(b"fake")
-    brand_dir = tmp_path / "brand"
-    brand_dir.mkdir()
-    (brand_dir / "brand_assets.json").write_text(
-        json.dumps({"brand_name": "T", "target_aspect_ratio": "9:16"})
-    )
+def test_run_command_with_url(tmp_path):
     runner = CliRunner()
-    with patch("clip_weave.__main__.analyze", return_value=SHOTS), \
-         patch("clip_weave.__main__.render", return_value=tmp_path / "final.mp4"):
+    with patch("clip_weave.__main__.pipeline_run", return_value=tmp_path / "videos" / "proj") as mock_run:
         result = runner.invoke(cli, [
-            "run", "--video", str(fake_video),
-            "--brand", str(brand_dir), "--mode", "hyperframes"
+            "run",
+            "--url", "https://example.com",
+            "--message", "产品发布",
+            "--videos-dir", str(tmp_path),
         ])
     assert result.exit_code == 0, result.output
+    user_input = mock_run.call_args[1]["user_input"]
+    assert "https://example.com" in user_input
 
 
-def test_render_command(tmp_path):
-    shots_file = tmp_path / "shots.json"
-    shots_file.write_text(SHOTS.model_dump_json())
-    brand_dir = tmp_path / "brand"
-    brand_dir.mkdir()
-    (brand_dir / "brand_assets.json").write_text(
-        json.dumps({"brand_name": "T", "target_aspect_ratio": "9:16"})
-    )
+def test_guard_command_clean(tmp_path):
+    comp_dir = tmp_path / "compositions"
+    comp_dir.mkdir()
+    (comp_dir / "01.html").write_text("<html><body></body></html>")
     runner = CliRunner()
-    with patch("clip_weave.__main__.render", return_value=tmp_path / "final.mp4"):
-        result = runner.invoke(cli, [
-            "render", "--shots", str(shots_file),
-            "--brand", str(brand_dir), "--mode", "hyperframes"
-        ])
-    assert result.exit_code == 0, result.output
+    result = runner.invoke(cli, ["guard", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "all clear" in result.output
+
+
+def test_guard_command_violation(tmp_path):
+    comp_dir = tmp_path / "compositions"
+    comp_dir.mkdir()
+    (comp_dir / "01.html").write_text("<html><body><video src='x.mp4'></video></body></html>")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["guard", str(tmp_path)])
+    assert result.exit_code == 1
+
+
+def test_guard_command_no_compositions_dir(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["guard", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "No compositions/" in result.output

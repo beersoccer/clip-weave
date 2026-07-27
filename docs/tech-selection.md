@@ -1,244 +1,246 @@
 # clip-weave 技术选型分析
 
-> 文档版本：v2.0 | 更新日期：2026-07-20
-> 本文档记录技术选型的分析过程与决策依据，最终架构方案见 `architecture.md`。
+> 文档版本：v4.0 | 更新日期：2026-07-23  
+> 最终架构方案见 `architecture.md`
 
 ---
 
 ## 目录
 
-1. [应用场景分析](#1-应用场景分析)
-2. [四阶段 Pipeline 总览](#2-四阶段-pipeline-总览)
-3. [样例视频分析方法论](#3-样例视频分析方法论)
-4. [无版权素材来源](#4-无版权素材来源)
-5. [开源项目选型分析](#5-开源项目选型分析)
+1. [应用场景与工具分工](#1-应用场景与工具分工)
+2. [三阶段方案总览](#2-三阶段方案总览)
+3. [渲染引擎：HyperFrames](#3-渲染引擎hyperframes)
+4. [模板库：hyperframes-launches](#4-模板库hyperframes-launches)
+5. [Phase 2 文生视频层：Kling / Veo](#5-phase-2-文生视频层kling--veo)
+6. [Phase 3 生成层：ViMax（远期）](#6-phase-3-生成层vimax远期)
+7. [被排除方案](#7-被排除方案)
+8. [无版权素材来源](#8-无版权素材来源)
 
 ---
 
-## 1. 应用场景分析
+## 1. 应用场景与工具分工
 
-### 1.1 核心需求拆解
+给定品牌素材包（logo / 色板 / 产品图 / 文案），自动生成风格一致的营销视频。
 
-给定一个优质样例视频，结合品牌素材，自动生成风格一致的新营销视频。
+| 内容类型 | 工具 | 理由 |
+|---------|------|------|
+| 品牌文字、数字、数据图表 | HyperFrames | 代码级精度，100% 可控 |
+| Kinetic type / 产品动效 | HyperFrames | 成熟动效语法（GSAP），lint 验证 |
+| 网站截图 / 产品图叠加层 | HyperFrames | capture 抓取后直接使用 |
+| 写实动态画面（汽车行驶/城市/自然）| Kling / Veo（Phase 2）| HF 无法生成真实画面 |
+| 真人出镜 | HeyGen 主平台 avatar | 独立产品，不在此路径 |
 
-| 挑战 | 说明 | 技术难点 |
+**核心边界**：HyperFrames 是 HTML 渲染引擎，它能精确还原设计，但不能凭空生成写实画面。
+任何期望"LLM 生成电影级视觉"的需求都应通过文生视频模型满足，而非 HF。
+
+---
+
+## 2. 三阶段方案总览
+
+| | Phase 1（当前）| Phase 2（验证）| Phase 3（远期）|
+|---|---|---|---|
+| **输入** | 模板 + 品牌素材 | 品牌素材 + Kling API | 品牌素材 + ViMax |
+| **核心技术** | HF 模板填充 + 工作流增强 | HF 故事线 + 文生视频 + FFmpeg | HF + ViMax screenplay |
+| **输出风格** | Motion Graphics（动效图形）| 动效 + 写实混合 | 全 AI 真实影像 |
+| **成本/视频** | ~$0.05 | ~$1–5 | ~$5–15 |
+| **制作时间** | 30–60 分钟 | 30–60 分钟 | 20–40 分钟 |
+| **状态** | ✅ 当前重点 | 🔲 验证目标 | 🔲 远期规划 |
+
+---
+
+## 3. 渲染引擎：HyperFrames
+
+**最终选定**：heygen-com/hyperframes（Apache-2.0）
+
+### 3.1 选型对比
+
+| | HyperFrames | Remotion |
 |---|---|---|
-| **风格提取** | 从样例视频中理解节奏、镜头语言、色调、转场风格 | 视频多模态理解，结构化输出 |
-| **内容重构** | 用新的品牌素材填充相同的叙事结构，而非简单复制 | LLM 创意改写 + 素材匹配 |
-| **精准渲染** | HTML→视频的像素级还原，确保动画、字幕、音频精准同步 | 确定性渲染引擎 |
+| **Stars** | 36k | 53k |
+| **许可** | Apache-2.0 | 公司使用需 $50/月起 |
+| **Agent 友好度** | ★★★★★（专为 Agent 设计）| ★★★★ |
+| **技术栈** | 原生 HTML/CSS/GSAP | React + TypeScript |
+| **LLM 生成质量** | 更高（HTML 是 LLM 训练数据主体）| 中（JSX 复杂度更高）|
+| **内置资产** | 109 registry blocks + 19 skills | 无 |
 
-### 1.2 典型使用场景
+### 3.2 HyperFrames 工作流的实测问题与对策
 
-- **电商大促**：同一模板视频，替换产品图/价格/文案，批量生成百款 SKU 的短视频
-- **品牌系列内容**：参考爆款竞品视频，提取叙事结构，用己方素材重新生成
-- **多平台适配**：一次生成，自动输出 16:9（YouTube）、9:16（抖音/Reels）、1:1（朋友圈）三种比例
+基于 xiaomi-su7 项目的实践总结（`docs/xiaomi-su7-video-production.md` §三）：
 
----
+| 问题 | 根因 | 对策 |
+|------|------|------|
+| 30min/composition + 多轮 lint | 框架规则密集，LLM 每次需重读 | 规则预注入生成 prompt；模板骨架填充而非空白生成 |
+| 素材利用率低（134 张用 2 张）| 无结构化素材输入，LLM 随机选 | 用户提供 ASSET_MANIFEST.md |
+| 已修复错误重现 | 长会话上下文压缩，规则细节丢失 | 将高频规则写入模板的 RULES.md |
+| 媒体文件无法在子合成中使用 | `media_in_subcomposition` 规则 | 视频/音频只放 index.html；子合成只含图形层 |
 
-## 2. 四阶段 Pipeline 总览
+### 3.3 关键框架规则（影响生成质量）
 
-### 2.1 整体流程图
-
-Stage 1 对两条路径完全共用；Stage 2-4 根据 `render_mode` 参数分叉：
+这些规则是 HF 特有的，不在通用 Web 文档中，必须预注入生成 prompt：
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  输入：样例视频 + 品牌素材包                                      │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│   Stage 1: 视频理解（VideoAgent）          ← 两条路径共用        │
-│   场景切变检测 (FFmpeg) → 关键帧提取                              │
-│   多模态 LLM 分析（Gemini + Claude + GPT-4o）                    │
-│   输出：shots.json + style.json                                  │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-              render_mode 参数控制分叉
-                  ┌────────┴────────┐
-                  ▼                 ▼
-        "vimax"（默认）       "hyperframes"
-   ─────────────────────   ─────────────────────
-   Stage 2-4: ViMax          Stage 2: LLM 生成 HTML
-   screenplay 格式转换        CSS/GSAP 动效代码
-   多 Agent 分镜规划          素材资产内嵌
-   AI 视频片段生成             Stage 3: HyperFrames 渲染
-   （Kling/Seedance/MiniMax） Headless Chromium 逐帧
-   角色/场景一致性保障         FFmpeg 合并帧序列+音频
-   ─────────────────────   ─────────────────────
-        output.mp4               output.mp4
-   AI 真实影像风格          Motion Graphics 动效风格
-   成本 ~$0.50-1.10/视频    成本 ~$0.05-0.08/视频
+media_in_subcomposition   → 视频/音频只能是 index.html 根节点的直接子元素
+gsap_css_transform_conflict → CSS transform 与 GSAP x/y 动画不能共存，改用 xPercent/yPercent
+gsap_timeline_set_initial_hide → gsap.set() 必须在 timeline 外调用，不能在 tl.set() t=0 处
+preserve-3d + filter       → 有 transform-style:preserve-3d 的元素祖先不能加 filter
 ```
-
-### 2.2 关键技术决策
-
-#### Stage 1：为什么先做帧提取再分析？
-
-直接将完整视频发送给视觉 LLM 的成本是先做帧提取再分析的 **10-16×**。
-
-| 方法 | 5min 视频成本 | GPU 需求 |
-|---|---|---|
-| 场景检测 + 帧提取 + Gemini Flash | ~$0.003 | 无 |
-| 原始视频 → Gemini Native | ~$0.05 | 无 |
-| 原始视频 → GPT-4V | ~$0.08 | 无 |
-| Video-LLaMA（本地） | $0（电费） | A100 必须 |
-
-最佳实践：用 FFmpeg 场景切变检测（`select='gt(scene,0.4)'`）提取关键帧再调用 API。
-
-#### Stage 2-4：两条路径的取舍
-
-| | ViMax 路径 | HyperFrames 路径 |
-|---|---|---|
-| **输出风格** | AI 真实影像（真人/实景） | Motion Graphics 动效 |
-| **单视频成本** | ~$0.50–1.10 | ~$0.05–0.08 |
-| **适合内容** | 人物出镜、产品实拍风格 | 纯文字/图片/logo 动效 |
-| **推荐用途** | 正式生产 | 快速预览、高频批量 |
-
-HyperFrames 路径用原生 HTML/CSS 而非 React/DSL，原因：LLM 生成 HTML 的质量显著更高（HTML 是训练数据主体），渲染结果确定性高（相同输入 = 相同视频帧）。
 
 ---
 
-## 3. 样例视频分析方法论
+## 4. 模板库：hyperframes-launches
 
-### 3.1 结构化提取内容
+**heygen-com/hyperframes-launches** 是 HyperFrames 官方生产级模板集合，每套均通过 CI 验证。
+
+### 4.1 可用模板
+
+| 模板 | 适用场景 | 核心特征 |
+|------|---------|---------|
+| product-launch | 品牌/产品发布（主力模板）| 窗口揭晓→锁定→step cards→收尾 |
+| software-demo | SaaS / 工具演示 | UI 截图叠加 + feature 卡片序列 |
+| texture-launch | 视觉驱动型 | 表达性文字 + shader 背景 |
+| website-to-hf | 网站宣传 | capture 截图 + agent 自动流程 |
+
+### 4.2 模板驱动的价值
+
+| 原有方式 | 模板填充方式 |
+|---------|------------|
+| 空白 HTML，LLM 自由发挥设计 | 已验证骨架，LLM 只做品牌替换 |
+| `visual_element: "沙漠地面"` → CSS 画沙漠 | `design_note: "全屏暗背景 + 白色 hero 字从下入场"` |
+| 产品图未注入，凭空创作 | base64 / 绝对路径内嵌每帧 `<img>` |
+| 30min/composition，3 轮 lint | 目标 15min/composition，≤2 轮 lint |
+
+**frame.md 设计系统**（每套模板内置）提供视频原生设计 token：
+- Typography：hero type 92px / weight 700，subtitle 24px，caption 16px  
+- Motion：entrance duration、exit overlap、dwell timing  
+- Color：品牌色直接映射为 CSS custom properties  
+
+---
+
+## 5. Phase 2 文生视频层：Kling / Veo
+
+### 5.1 使用场景与定位
+
+Phase 2 中文生视频模型**只负责写实动态镜头**，不替代 HF 的文字/动效层：
+
+```
+写实场景（汽车行驶、城市、内饰特写）→ Kling image-to-video
+品牌文字 / 数字 / step cards / endcard  → HyperFrames HTML（保持精度）
+FFmpeg 合流 → 最终 MP4
+```
+
+### 5.2 模型选型
+
+| | Kling 3.0 | Google Veo 3.1 | Sora 2 |
+|---|---|---|---|
+| **价格** | ~$0.11–0.14/s（Pro）| ~$0.35/s | ~$0.13/s |
+| **image-to-video** | ✅ 强（产品一致性高）| ✅ | ✅ |
+| **运动/摄影控制** | ★★★★★（高速运动最佳）| ★★★★（物理最准确）| ★★★★ |
+| **音频生成** | ✅ 原生 | ✅ 原生 | ❌ 无 |
+| **可用性** | ✅ API 稳定 | ✅ Google AI Pro | ⚠️ 通过 ChatGPT |
+| **推荐场景** | 汽车/产品动态镜头 | 精准物理/自然场景 | 叙事性画面 |
+
+**Phase 2 首选 Kling**：image-to-video 质量最高，适合用产品图作起始帧，API 稳定。
+
+### 5.3 成本估算（以 30s 视频为例）
+
+设写实镜头占比 40%（12s），其余为 HF 动效层：
+
+| 模型 | 写实层成本 | HF 层成本 | 合计 |
+|------|---------|---------|------|
+| Kling 3.0 Pro | 12s × $0.14 = $1.68 | $0.03 | **$1.71** |
+| Veo 3.1 | 12s × $0.35 = $4.20 | $0.03 | **$4.23** |
+| 纯 HF | — | $0.05 | **$0.05** |
+
+**决策阈值**：若 Kling 混合方案主观质量评分 ≥ 纯 HF +2 分（10 分制），$1.71 的增量成本是合理的。
+
+---
+
+## 6. Phase 3 生成层：ViMax（远期）
+
+接入 HKUDS/ViMax（screenplay → Kling/Seedance/MiniMax → AI 真实影像全流程）。
+
+**触发条件**：Phase 2 验证通过 + 有完全写实影像（无动效覆盖层）的需求场景。
+
+- `STORYBOARD.json → ViMax screenplay` 转换约 20 行映射函数，信息无损
+- 输出 AI 真人/实景风格，成本 ~$5–15/视频（比 Phase 2 高 3–8×）
+
+---
+
+## 7. 被排除方案
+
+> 保留研究记录，避免将来重复纳入研究目标。
+
+### 7.1 OpenMontage（calesthio/OpenMontage，~40k stars）
+
+**研究结论**：工具链设计优秀，但与 clip-weave 的集成路径不兼容；核心设计理念已被吸收。
+
+**工具链结构（源码验证）：**
+
+| 工具文件 | 实现 | 输出 |
+|---------|------|------|
+| `video_analyzer.py` | BaseTool，深度：transcript_only / standard / deep | 编排下列工具，输出 VideoAnalysisBrief JSON |
+| `scene_detect.py` | PySceneDetect（ContentDetector / AdaptiveDetector）+ FFmpeg 回退 | 场景边界列表，代码层（非 LLM）|
+| `frame_sampler.py` | FFmpeg，策略 interval / count / scene_guided | keyframes/ 目录 + 时间戳列表 |
+| `transcriber.py` | faster-whisper，字级时间戳 + 语言检测 | {segments, word_timestamps, language} |
+| `transcript_fetcher.py` | youtube-transcript-api | YouTube caption 直取 |
+| `video-reference-analyst.md` | Agent skill | LLM 5-Aspect 结构化输出 |
+
+**VideoAnalysisBrief 关键字段（`schemas/artifacts/video_analysis_brief.schema.json`）：**
 
 ```json
 {
-  "style": {
-    "pacing": "fast",
-    "color_tone": "warm",
-    "typography": "bold-sans",
-    "transition": "cut",
-    "aspect_ratio": "9:16"
+  "content_analysis": {
+    "tone": "cinematic|dramatic|inspirational|corporate|...",
+    "hook_technique": "...",
+    "call_to_action": "..."
   },
-  "shots": [
-    {
-      "index": 1,
-      "start": 0.0,
-      "end": 2.5,
-      "duration": 2.5,
-      "type": "hook",
-      "composition": "centered",
-      "text_overlay": "痛点文案",
-      "visual_element": "人物特写",
-      "audio_cue": "节奏感强的背景音乐起"
-    }
-  ],
-  "narrative_structure": "AIDA",
-  "total_duration": 30,
-  "shot_count": 12
+  "structure_analysis": {
+    "pacing_profile": { "cuts_per_minute": 53.3, "pacing_style": "rapid_fire" },
+    "scenes": [{ "narration_text": "...", "visual_type": "b_roll|text_card|product_shot|..." }]
+  },
+  "replication_guidance": "如果要做类似视频的导演级操作指令"
 }
 ```
 
-### 3.2 营销叙事结构
+**4 个有价值的设计，已吸收到 STORYBOARD.json 规范中：**
 
-| 结构 | 全称 | 镜头分配 | 适用场景 |
-|---|---|---|---|
-| **AIDA** | Attention→Interest→Desire→Action | 2+3+4+1 镜 | 品牌/产品通用 |
-| **PAS** | Problem→Agitate→Solution | 3+3+4 镜 | 痛点驱动型 |
-| **Hook-Story-Offer** | 钩子→故事→报价 | 1+6+3 镜 | 电商转化型 |
-| **Before-After-Bridge** | 前→后→桥接 | 3+4+3 镜 | 效果展示型 |
+| # | 特性 | 吸收方式 |
+|---|------|---------|
+| 1 | 两阶段分析（FFmpeg 结构 + LLM 视觉理解）| clip-weave 中代码层提取 + LLM 语义 |
+| 2 | `narration_text` 字级时间戳绑定 | STORYBOARD.json 的 `narration_text` 字段 |
+| 3 | `visual_type` enum + `pacing_style` 代码分类 | STORYBOARD.json 的 `visual_type` 字段 |
+| 4 | `replication_guidance` 导演指令 | STORYBOARD.json 顶层字段 |
 
-### 3.3 关键帧提取命令
+**不直接使用的原因：**
+- 工具是 `BaseTool` 子类，由 AI agent 调用驱动，不能作为 Python 库 `import`
+- `VideoAnalysisBrief` 格式与 clip-weave pipeline 不兼容，需重写
 
-```bash
-# 场景切变检测（适合节奏快的营销视频）
-ffmpeg -i sample.mp4 \
-  -vf "select='gt(scene,0.35)',scale=1280:720" \
-  -vsync vfr \
-  frames/frame_%04d.jpg
-
-# 固定间隔提取（适合慢节奏视频）
-ffmpeg -i sample.mp4 -vf fps=1 frames/frame_%04d.jpg
-
-# 提取音频（用于节奏分析）
-ffmpeg -i sample.mp4 -q:a 0 -map a audio.mp3
-```
+**被排除的具体原因：** clip-weave 不再以"输入样例视频 → 分析叙事 → 复制"作为主路径，
+改为"模板选择 + 品牌素材填充"，消除了对视频分析层的依赖。
 
 ---
 
-## 4. 无版权素材来源
+### 7.2 其他被排除方案
 
-### 4.1 免费视频素材 API（可商用，无需署名）
+| 方案 | 排除原因 |
+|------|---------|
+| **VideoAgent**（HKUDS）| 交互式多 Agent 系统（入口为 `input("User Requirement:")`），不能函数调用；ViMax 是其架构下的正确替代 |
+| **Remotion 生态** | React/JSX 技术栈，与 HyperFrames HTML 渲染不兼容；HF registry 已覆盖同等能力，且 Apache-2.0 无商用成本 |
+| **agentcut** | 接口只接收单一 prompt，VideoAnalysisBrief 大量结构化信息被丢弃 |
+| **mmaction2 / SlowFast** | 输出是预定义动作分类标签（400 类），不能描述广告叙事；2022 年后停止维护，强依赖 GPU |
+| **InternVideo3** | 能力覆盖，但当前无 GPU 环境；有 GPU 时可重新评估 |
+| **DeepScene** | Shell 脚本封装，输出无法直接对接 clip-weave pipeline |
+| **Sora（文生视频）** | 无原生 API（通过 ChatGPT 访问），image-to-video 质量弱于 Kling，不适合批量生产调用 |
 
-| 平台 | 限制 | 最佳用途 |
-|---|---|---|
+---
+
+## 8. 无版权素材来源
+
+| 平台/工具 | 限制 | 用途 |
+|---------|------|------|
 | **Pexels** | 无商用限制 | 人物/场景 B-Roll |
 | **Pixabay** | 无商用限制，无需署名 | 背景/自然素材 |
 | **Mixkit** | 完全免费，含 4K | 高质量转场/背景 |
 | **Coverr** | 商用可用，无需署名 | 商业场景视频 |
-
-### 4.2 AI 生成素材（完全无版权风险）
-
-| 用途 | 推荐工具 | 成本 |
-|---|---|---|
-| 产品场景图 | Flux Pro / SDXL（本地） | ~$0.01/张 或免费 |
-| 背景视频 | Wan2.2（开源）/ Kling | $0（本地）/ $0.05/段 |
-| 旁白音频 | Kokoro TTS（本地开源） | $0 |
-| 背景音乐 | MusicGen（Meta，本地） | $0 |
-
----
-
-## 5. 开源项目选型分析
-
-### 5.1 视频理解层选型
-
-共考察 6 个项目：
-
-| 项目 | Stars | 许可 | 任务匹配 | 工程成本 | 运行成本 | 维护 | 总分 | 推荐 |
-|---|---|---|---|---|---|---|---|---|
-| mmaction2 | ~14k | Apache-2.0 | ★☆ | ★★ | ★★ | ★☆ | 6/20 | ❌ |
-| SlowFast | 7.4k | Apache-2.0 | ★☆ | ★☆ | ★★ | ★☆ | 5/20 | ❌ |
-| InternVideo3 | ~3k | MIT | ★★★ | ★★ | ★★ | ★★★★ | 11/20 | ⚠️ 有 GPU 时 |
-| BroderQi/Storyboard | ~50 | - | ★★★★ | ★★★★ | ★★★★★ | ★★★ | 16/20 | ✅ 备选 |
-| **DeepScene** | ~80 | MIT | ★★★★★ | ★★★★★ | ★★★★★ | ★★★ | **18/20** | ✅ **Stage 1 首选** |
-| **VideoAgent** | 1.5k | MIT | ★★★★★ | ★★★★ | ★★★★ | ★★★★★ | **18/20** | ⚠️ **接口不匹配（见注）** |
-
-**高 stars 项目（mmaction2 / SlowFast）不选的原因：** 输出是预定义动作分类标签（400 类），不能描述广告叙事结构；2022 年后停止维护；必须 GPU。
-
-**最终决策：** 按 DeepScene 方式自行实现（FFmpeg 帧提取 + LLM 多模态分析），内置于 `adapters/video_analyzer.py`，无需引入外部库。
-
-> ⚠️ **VideoAgent 注：** VideoAgent 采用的技术路径（FFmpeg + Gemini 分析）与本项目一致，因此功能评分高。但其架构是交互式多 Agent 系统（入口为 `input("User Requirement:")`），无法以函数调用方式直接输出 shots.json，不适合作为 Python 库集成。Stage 2b（ViMax 路径）同样采用 HKUDS 生态，但 ViMax 是独立的生成框架，接口完全不同。
-
-#### 源码对比后的借鉴点
-
-对 DeepScene（shell 脚本）和 Storyboard（.NET 桌面 GUI）做了源码级分析，`video_analyzer.py` 在任务匹配度（内容感知场景检测 vs 均匀采样、营销专项 schema）和可嵌入性上均已超越两者。以下字段值得在后续阶段引入：
-
-**Phase 2b（ViMax 接入）时扩充到 `Shot` schema：**
-
-| 字段 | 来源 | 用途 |
-|---|---|---|
-| `reconstruction_prompt` | DeepScene | 每镜头的自然语言重创意描述，直接作为 ViMax/Kling prompt |
-| `uncertainties` | DeepScene | LLM 对该镜头分析不确定的项，用于人工审核和质量评估 |
-| `first_frame_prompt` | Storyboard | 首帧图像生成 prompt，供 Kling/Seedance 的 image2video 模式 |
-| `last_frame_prompt` | Storyboard | 末帧图像生成 prompt，控制镜头出点 |
-| `video_prompt` | Storyboard | 该镜头的视频生成 prompt（动作/摄影机运动综合描述） |
-| `camera_movement` | Storyboard | 摄影机运动方式（push in / pull out / pan / static 等） |
-
-**备用分析策略（复杂场景准确度提升）：** DeepScene 的两步法——先让 LLM 自由叙述每帧内容，再对叙述结果做结构化提取——对镜头内容复杂的视频比 clip-weave 当前的单步结构化调用更准确。可作为 `video_analyzer.py` 的 `--two-pass` 模式备选。
-
-### 5.2 生成层 Pipeline：ViMax vs agentcut
-
-Stage 1 输出 `ShotsOutput`（结构化富内容：shots + style + narrative_structure）。Stage 2b 选哪个生成框架接收它？
-
-- **agentcut** 接口只接收单一 prompt，ShotsOutput 大部分信息被丢弃，Director Agent 会从头重新规划
-- **ViMax `Script2Video`** 直接消费 screenplay 格式，ShotsOutput 可通过约 20 行胶水代码转换为 ViMax 入参，信息无损传递
-
-| 维度 | ShotsOutput + ViMax | ShotsOutput + agentcut |
-|---|---|---|
-| 接口匹配度 | ★★★★★ | ★★☆☆☆ |
-| 信息保留率 | 高 | 低（被重新覆盖） |
-| 角色/场景一致性 | ★★★★★ | ★★☆☆☆ |
-| MVP 速度 | 较慢 | **较快** |
-
-**结论：** 核心诉求是"参考样例 → 结构一致新视频"，ShotsOutput + ViMax 是原生匹配。agentcut 适合允许 AI 自由发挥、2 天内跑通 MVP 的场景。
-
-### 5.3 HTML→视频渲染引擎
-
-| 项目 | Stars | 许可 | Agent 友好度 | 渲染方式 | 商用 |
-|---|---|---|---|---|---|
-| **HyperFrames** | 36k | Apache-2.0 | ★★★★★ | Chromium+FFmpeg，确定性 | ✅ 免费 |
-| Remotion | 53.2k | 需公司许可 | ★★★★ | Chromium+FFmpeg+Lambda | ⚠️ $50/月起 |
-
-**结论：** AI Agent 生成场景首选 HyperFrames（专为 Agent 设计，免费）；团队有 React 基础且预算充足时可选 Remotion。
+| **Kokoro TTS**（本地开源）| $0 | 旁白音频生成 |
+| **MusicGen**（Meta，本地）| $0 | 背景音乐生成 |
