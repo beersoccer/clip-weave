@@ -1,116 +1,63 @@
 import os
+from pathlib import Path
 from unittest.mock import patch
-
 import pytest
-
 from clip_weave.config import load_config
 
 
-def _env(**kwargs) -> dict:
-    base = {
-        "VIDEO_ANALYSIS_API_KEY": "va-key",
-        "HTML_GEN_API_KEY": "hg-key",
-    }
-    base.update(kwargs)
-    return base
-
-
 def test_load_config_defaults():
-    with patch.dict(os.environ, _env(), clear=True):
+    with patch.dict(os.environ, {}, clear=True):
         cfg = load_config()
-    assert cfg.video_analysis_model == "gemini-2.5-flash"
-    assert cfg.html_gen_model == "claude-sonnet-4-6"
-    assert cfg.scene_threshold == 0.35
-    assert cfg.video_analysis_base_url is None
-    assert cfg.html_gen_base_url is None
+    assert cfg.embedding_provider == "gemini"
+    assert cfg.vision_provider == "gemini"
+    assert cfg.tts_provider == "heygen"
+    assert cfg.gemini_api_key == ""
+    assert cfg.openai_api_key == ""
 
 
-def test_load_config_custom_values():
-    with patch.dict(os.environ, _env(
-        VIDEO_ANALYSIS_BASE_URL="http://gw.example.com/v1",
-        VIDEO_ANALYSIS_MODEL="gpt-4o",
-        HTML_GEN_BASE_URL="http://gw.example.com/v1",
-        HTML_GEN_MODEL="claude-opus-4-7",
-        SCENE_THRESHOLD="0.5",
-    ), clear=True):
+def test_load_config_gemini_key():
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True):
         cfg = load_config()
-    assert cfg.video_analysis_base_url == "http://gw.example.com/v1"
-    assert cfg.video_analysis_model == "gpt-4o"
-    assert cfg.html_gen_base_url == "http://gw.example.com/v1"
-    assert cfg.html_gen_model == "claude-opus-4-7"
-    assert cfg.scene_threshold == 0.5
+    assert cfg.gemini_api_key == "test-key"
+    assert cfg.has_embedding is True
 
 
-def test_load_config_empty_base_url_becomes_none():
-    with patch.dict(os.environ, _env(
-        VIDEO_ANALYSIS_BASE_URL="",
-        HTML_GEN_BASE_URL="",
-    ), clear=True):
+def test_load_config_google_api_key_fallback():
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "goog-key"}, clear=True):
         cfg = load_config()
-    assert cfg.video_analysis_base_url is None
-    assert cfg.html_gen_base_url is None
+    assert cfg.gemini_api_key == "goog-key"
 
 
-def test_load_config_invalid_threshold_warns_and_defaults(caplog):
-    import logging
-    with patch.dict(os.environ, _env(SCENE_THRESHOLD="not-a-float"), clear=True):
-        with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
-            cfg = load_config()
-    assert cfg.scene_threshold == 0.35
-    assert "SCENE_THRESHOLD" in caplog.text
+def test_load_config_openai_key():
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "oai-key"}, clear=True):
+        cfg = load_config()
+    assert cfg.openai_api_key == "oai-key"
 
 
-def test_load_config_missing_api_keys_warns(caplog):
+def test_has_embedding_false_without_keys():
+    with patch.dict(os.environ, {}, clear=True):
+        cfg = load_config()
+    assert cfg.has_embedding is False
+
+
+def test_has_embedding_true_with_gemini():
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "k"}, clear=True):
+        cfg = load_config()
+    assert cfg.has_embedding is True
+
+
+def test_load_config_warns_without_keys(caplog):
     import logging
     with patch.dict(os.environ, {}, clear=True):
         with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
-            cfg = load_config()
-    assert cfg.video_analysis_api_key == ""
-    assert cfg.html_gen_api_key == ""
-    assert "VIDEO_ANALYSIS_API_KEY" in caplog.text
-    assert "HTML_GEN_API_KEY" in caplog.text
-
-
-def test_load_config_any_model_string_accepted():
-    """Model names are free-form strings; no validation errors should be raised."""
-    with patch.dict(os.environ, _env(HTML_GEN_MODEL="any-model-name-v99"), clear=True):
-        cfg = load_config()
-    assert cfg.html_gen_model == "any-model-name-v99"
-
-
-def test_load_config_gateway_html_model_default():
-    """When HTML_GEN_BASE_URL is set but HTML_GEN_MODEL is not, default to gateway name."""
-    with patch.dict(os.environ, _env(
-        HTML_GEN_BASE_URL="http://gw.example.com/bedrock/",
-    ), clear=True):
-        cfg = load_config()
-    assert cfg.html_gen_model == "global.anthropic.claude-sonnet-4-6"
-
-
-def test_load_config_direct_html_model_default():
-    """When HTML_GEN_BASE_URL is not set, default to direct Anthropic model name."""
-    with patch.dict(os.environ, _env(), clear=True):
-        cfg = load_config()
-    assert cfg.html_gen_model == "claude-sonnet-4-6"
-
-
-def test_load_config_video_base_url_missing_v1_warns(caplog):
-    """VIDEO_ANALYSIS_BASE_URL without /v1 should produce a warning."""
-    import logging
-    with patch.dict(os.environ, _env(
-        VIDEO_ANALYSIS_BASE_URL="http://gw.example.com/vertex/",
-    ), clear=True):
-        with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
             load_config()
-    assert "v1" in caplog.text
+    assert "GEMINI_API_KEY" in caplog.text
 
 
-def test_load_config_video_base_url_with_v1_no_warn(caplog):
-    """VIDEO_ANALYSIS_BASE_URL ending with /v1 should NOT produce a v1 warning."""
-    import logging
-    with patch.dict(os.environ, _env(
-        VIDEO_ANALYSIS_BASE_URL="http://gw.example.com/vertex/v1",
-    ), clear=True):
-        with caplog.at_level(logging.WARNING, logger="clip_weave.config"):
-            load_config()
-    assert "does not end with /v1" not in caplog.text
+def test_load_config_yaml_providers(tmp_path):
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text("providers:\n  embedding: openai\n  tts: kokoro\n")
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "oai-key"}, clear=True):
+        cfg = load_config(project_root=tmp_path)
+    assert cfg.embedding_provider == "openai"
+    assert cfg.tts_provider == "kokoro"

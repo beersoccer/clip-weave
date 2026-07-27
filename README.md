@@ -148,6 +148,37 @@ SCENE_THRESHOLD=0.35
 
 将一段 MP4/MOV 视频（建议 30s 以内）放到任意路径，例如 `assets/sample.mp4`。
 
+#### 从 YouTube 下载（使用 yt-dlp）
+
+```bash
+# 安装 yt-dlp（macOS）
+brew install yt-dlp
+
+# 下载为 mp4，720p（推荐：分析阶段帧会缩至 512px 宽，1080p 无额外收益）
+yt-dlp --cookies-from-browser chrome \
+  -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
+  --merge-output-format mp4 \
+  -o "assets/sample.mp4" \
+  "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+> `--cookies-from-browser chrome`：使用 Chrome 登录态绕过 YouTube 机器人验证，需提前在 Chrome 中登录 YouTube。  
+> 若使用 Safari 或 Firefox，将 `chrome` 替换为 `safari` / `firefox`。
+
+**常用变体：**
+
+```bash
+# 直接保存到 output 目录
+yt-dlp --cookies-from-browser chrome \
+  -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]" \
+  --merge-output-format mp4 \
+  -o "output/input.mp4" \
+  "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# 查看该视频的所有可用格式（再决定下载哪个）
+yt-dlp --cookies-from-browser chrome -F "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
 ### 第五步：验证分析阶段（Stage 1）
 
 先单独跑分析，确认 FFmpeg 和 LLM 接口配置正常，再做完整渲染：
@@ -265,6 +296,9 @@ uv run pytest tests/test_e2e.py -v
 ---
 
 ## 常见问题
+
+**Q: `yt-dlp: Sign in to confirm you're not a bot`**  
+A: YouTube 需要验证身份。在 Chrome/Safari/Firefox 中登录 YouTube，然后加上 `--cookies-from-browser chrome`（或对应浏览器名）重试。
 
 **Q: `ffmpeg: command not found`**  
 A: 参考上方"前置依赖"中的 FFmpeg 安装步骤。
