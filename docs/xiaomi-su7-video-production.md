@@ -24,7 +24,7 @@
 
 **参考高质量的同类型已验证样例，远比从零设计更有效。**
 
-对于 HyperFrames 项目，优先寻找 `vendors/hyperframes-launches/` 中与目标风格最接近的样例，  
+对于 HyperFrames 项目，优先寻找 `~/workspace/hyperframes-launches/` 中与目标风格最接近的样例，  
 完整分析其叙事结构、动效语法、设计 tokens，再适配品牌素材，是提升输出质量的核心路径。
 
 这也是 v1 失败的本质原因：没有参考样例，agent 自由发挥叙事结构和动效语法，  
@@ -141,7 +141,7 @@ Kling 3.0 在高速运动+品牌汽车方面效果最好；Veo 3.1 适合需要�
 
 | 问题 | 解决方案 |
 |------|---------|
-| 生成前无参考样例 | 先找 `vendors/hyperframes-launches/` 最近似的项目，分析叙事+动效+token |
+| 生成前无参考样例 | 先找 `~/workspace/hyperframes-launches/` 最近似的项目，分析叙事+动效+token |
 | 素材利用率低（v1: 134张只用2张）| 制作前人工筛选候选素材，写入 STORYBOARD.md 的 `asset_candidates` |
 | HTML lint 迭代多 | 每写完一个 composition 立即 `npx hyperframes check`，不要批量检查 |
 | 高频错误重现 | 将已知规则（media_in_subcomposition、transform 冲突）记录在 CLAUDE.md |

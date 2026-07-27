@@ -1,6 +1,6 @@
 # HyperFrames 深度分析
 
-> 2026-07-24 | 基于 vendors/hyperframes/ 源码（packages/ + skills/）全量阅读
+> 2026-07-24 | 基于 ~/workspace/hyperframes/ 源码（packages/ + skills/）全量阅读
 
 ---
 
@@ -412,7 +412,7 @@ HF 的 Step 5 并行子 agent 之所以能减少遗忘，是因为 `frame-packet
 
 ### 9.5 参考样例 > 从零设计
 
-实测结论：找到一个与目标风格接近的已验证官方样例（`vendors/hyperframes-launches/`），
+实测结论：找到一个与目标风格接近的已验证官方样例（`~/workspace/hyperframes-launches/`），
 分析其叙事结构、动效语法、设计 tokens，再适配品牌素材，
 远比让 agent 从零创作更快、质量更稳定。
 
