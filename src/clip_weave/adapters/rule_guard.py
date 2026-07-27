@@ -77,16 +77,25 @@ def _check_gsap_css_transform_conflict(html: str, path: Path) -> list[Violation]
 
 
 def _check_gsap_timeline_set_initial_hide(html: str, path: Path) -> list[Violation]:
-    """gsap.set() called at page load on clip elements (those clips not in DOM yet)."""
+    """gsap.set() at page-load scope on clip elements not yet in DOM.
+
+    Only flags calls with ≤4 spaces of leading indent (top-level / first-level
+    scope). Calls inside callbacks or function bodies (indent ≥5) are skipped to
+    avoid false positives from gsap.set() used inside ScrollTrigger, onComplete, etc.
+    """
     violations = []
     for i, line in enumerate(html.splitlines(), 1):
-        if re.search(r"\bgsap\.set\s*\(", line):
-            violations.append(Violation(
-                rule_id="gsap_timeline_set_initial_hide",
-                file=path,
-                line=i,
-                detail="gsap.set() at page load — if targeting a later-scene clip, use tl.set() inside timeline",
-            ))
+        stripped = line.lstrip()
+        if not re.search(r"\bgsap\.set\s*\(", stripped):
+            continue
+        if len(line) - len(stripped) > 4:  # inside a callback — skip
+            continue
+        violations.append(Violation(
+            rule_id="gsap_timeline_set_initial_hide",
+            file=path,
+            line=i,
+            detail="gsap.set() at page load — if targeting a later-scene clip, use tl.set() inside timeline",
+        ))
     return violations
 
 
@@ -103,16 +112,27 @@ def _check_preserve_3d_filter(html: str, path: Path) -> list[Violation]:
     return violations
 
 
-def _fix_media_in_subcomposition(html: str) -> str | None:
-    """Remove <video>/<audio> from composition — caller moves them to index.html."""
-    return None  # Complex structural fix; flag for manual review
-
-
 def _fix_gsap_css_transform_conflict(html: str) -> str:
-    """Replace GSAP x: with xPercent: and y: with yPercent: where CSS translateX/Y is used."""
-    html = re.sub(r"\bx:\s*(-?[\d.]+)", lambda m: f"xPercent: {m.group(1)}", html)
-    html = re.sub(r"\by:\s*(-?[\d.]+)", lambda m: f"yPercent: {m.group(1)}", html)
-    return html
+    """Replace x:/y: with xPercent:/yPercent: inside GSAP call object literals only.
+
+    Scopes the substitution to the vars object of gsap.to/from/fromTo/set calls so
+    that non-GSAP JS objects (chart configs, SVG data, etc.) are not corrupted.
+    """
+    def _rewrite_vars(obj: str) -> str:
+        obj = re.sub(r"\bx:\s*(-?[\d.]+)", lambda m: f"xPercent: {m.group(1)}", obj)
+        obj = re.sub(r"\by:\s*(-?[\d.]+)", lambda m: f"yPercent: {m.group(1)}", obj)
+        return obj
+
+    def _replace_call(m: re.Match) -> str:
+        return m.group(1) + _rewrite_vars(m.group(2))
+
+    # Match (gsap|tl).to/from/fromTo/set(…, { … }) and rewrite only the vars object
+    return re.sub(
+        r"((?:gsap|tl)\s*\.\s*(?:to|from|fromTo|set)\s*\([^{]*?)(\{[^}]*\})",
+        _replace_call,
+        html,
+        flags=re.DOTALL,
+    )
 
 
 _FIXERS = {
@@ -123,9 +143,8 @@ _FIXERS = {
 def scan(compositions_dir: Path) -> GuardResult:
     """Scan all HTML files in compositions_dir for HF rule violations."""
     result = GuardResult()
-    html_files = list(compositions_dir.glob("*.html")) + list(
-        compositions_dir.glob("**/*.html")
-    )
+    # **/*.html matches at all depths including root; no need for *.html separately
+    html_files = list(compositions_dir.glob("**/*.html"))
 
     for path in html_files:
         html = path.read_text(encoding="utf-8", errors="replace")
@@ -166,4 +185,6 @@ def save_history(project_dir: Path, result: GuardResult) -> None:
         existing = json.loads(history_path.read_text())
     for v in result.fixed:
         existing[v.fingerprint] = {"rule_id": v.rule_id, "status": "fixed"}
+    for v in result.unknown:
+        existing.setdefault(v.fingerprint, {"rule_id": v.rule_id, "status": "unknown"})
     history_path.write_text(json.dumps(existing, indent=2))

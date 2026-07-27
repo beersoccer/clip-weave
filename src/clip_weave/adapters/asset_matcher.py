@@ -54,21 +54,22 @@ def _keyword_match(query: str, assets: list[dict], top_k: int) -> list[dict]:
 
 
 def _embedding_match(query: str, assets: list[dict], top_k: int, cache: dict) -> list[dict]:
-    """Embedding-based matching via Gemini or OpenAI."""
+    """Embedding-based matching via Gemini text-embedding-004."""
     try:
         import google.generativeai as genai  # type: ignore
         genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
-        def embed(text: str) -> list[float]:
-            if text in cache:
-                return cache[text]
+        def embed(text: str, task_type: str) -> list[float]:
+            cache_key = f"{task_type}:{text}"
+            if cache_key in cache:
+                return cache[cache_key]
             result = genai.embed_content(
                 model="models/text-embedding-004",
                 content=text,
-                task_type="RETRIEVAL_DOCUMENT",
+                task_type=task_type,
             )
             vec = result["embedding"]
-            cache[text] = vec
+            cache[cache_key] = vec
             return vec
 
         import math
@@ -79,10 +80,10 @@ def _embedding_match(query: str, assets: list[dict], top_k: int, cache: dict) ->
             nb = math.sqrt(sum(x * x for x in b))
             return dot / (na * nb + 1e-9)
 
-        q_vec = embed(query)
+        q_vec = embed(query, "RETRIEVAL_QUERY")
         scored = []
         for asset in assets:
-            a_vec = embed(asset["description"])
+            a_vec = embed(asset["description"], "RETRIEVAL_DOCUMENT")
             score = cosine(q_vec, a_vec)
             scored.append((score, asset))
         scored.sort(key=lambda x: -x[0])
@@ -117,7 +118,7 @@ def match_assets(
         except Exception:
             pass
 
-    use_embeddings = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    use_embeddings = bool(os.environ.get("GEMINI_API_KEY"))
     results = []
     for query in beat_queries:
         if use_embeddings:
