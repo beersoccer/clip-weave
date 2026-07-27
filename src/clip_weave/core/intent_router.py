@@ -34,7 +34,6 @@ _WORKFLOW_KEYWORDS: list[tuple[list[str], WorkflowName]] = [
     (["PR", "commit", "pull request", "代码变更"], "pr-to-video"),
 ]
 
-_AUTONOMOUS_SIGNALS = ["直接", "全自动", "just do it", "autonomous", "不用问", "自动"]
 _COLLABORATIVE_SIGNALS = ["逐步", "审批", "一步步", "collaborative", "我想看"]
 _COMPANION_SIGNALS = ["一起做", "companion", "共创"]
 
@@ -47,9 +46,13 @@ class RoutingResult:
     source_url: str | None
     source_type: Literal["url", "figma", "files", "text"]
     message: str
+    length: str = "30s"
+    aspect: str = "1920x1080"
 
 
-def detect_source_type(user_input: str, uploaded_files: list[Path] | None = None) -> tuple:
+def detect_source_type(
+    user_input: str, uploaded_files: list[Path] | None = None
+) -> tuple[Literal["url", "figma", "files", "text"], str | None]:
     """Returns (source_type, source_url) from user input."""
     url_match = re.search(r"https?://\S+", user_input)
     if url_match:
@@ -88,6 +91,8 @@ def route(
     user_input: str,
     uploaded_files: list[Path] | None = None,
     message: str = "",
+    length: str = "30s",
+    aspect: str = "1920x1080",
 ) -> RoutingResult:
     source_type, source_url = detect_source_type(user_input, uploaded_files)
     workflow = detect_workflow(user_input, source_type)
@@ -99,6 +104,8 @@ def route(
         source_url=source_url,
         source_type=source_type,
         message=message or user_input[:120],
+        length=length,
+        aspect=aspect,
     )
 
 
@@ -115,9 +122,9 @@ flow: {result.flow}
 storyboard: {storyboard_val}
 message: "{result.message}"
 destination: social-feed
-aspect: 1920x1080
+aspect: {result.aspect}
 language: zh
-length: 30s
+length: {result.length}
 ---
 
 ## Intent

@@ -24,19 +24,27 @@ def run(
     videos_dir: Path = Path("videos"),
     uploaded_files: list[Path] | None = None,
     message: str = "",
+    length: str = "30s",
     cfg: Config | None = None,
 ) -> Path:
     """Full pipeline: route → init → brief → asset-match → delegate.
 
-    Returns project_dir. Caller should then invoke the HF workflow skill.
+    If BRIEF.md already exists in project_dir, the Intent Router and Project
+    Factory steps are skipped (§4.1.1 resume path). Returns project_dir.
     """
     if cfg is None:
         cfg = load_config()
 
     project_dir = videos_dir / project_name
 
+    # §4.1.1 resume path: existing BRIEF.md → delegate directly, skip intent interview
+    if (project_dir / "BRIEF.md").exists():
+        logger.info("BRIEF.md already exists — skipping intent routing, delegating directly")
+        print_delegation_instructions(project_dir)
+        return project_dir
+
     # ① Intent Router
-    result = route(user_input, uploaded_files=uploaded_files, message=message)
+    result = route(user_input, uploaded_files=uploaded_files, message=message, length=length)
     logger.info("Routed to workflow=%s flow=%s source=%s",
                 result.workflow, result.flow, result.source_type)
 

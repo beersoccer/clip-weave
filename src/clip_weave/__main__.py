@@ -43,6 +43,7 @@ def run_cmd(url, message, project, videos_dir, length, workflow):
         project_name=project_name,
         videos_dir=Path(videos_dir),
         message=message,
+        length=length,
         cfg=cfg,
     )
     click.echo(f"Project ready: {project_dir}")
