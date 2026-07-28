@@ -1,6 +1,9 @@
+"""clip-weave configuration — loads from env vars."""
+
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -11,71 +14,53 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    video_analysis_base_url: str | None  # None = SDK default (direct vendor)
-    video_analysis_api_key: str
-    video_analysis_model: str
+    gemini_api_key: str = ""
+    openai_api_key: str = ""
+    figma_token: str = ""
 
-    html_gen_base_url: str | None        # None = SDK default (direct vendor)
-    html_gen_api_key: str
-    html_gen_model: str
+    # Vision gateway — Asset Matcher image description enrichment (chat/completions).
+    video_analysis_base_url: str = ""
+    video_analysis_api_key: str = ""
+    video_analysis_model: str = "gemini-2.5-flash"
 
-    pexels_api_key: str
-    scene_threshold: float
+    # Embedding gateway — semantic ranking (/v1/embeddings, OpenAI-compatible).
+    # Independent of video_analysis_*; falls back to BM25 when not configured.
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+
+    @property
+    def has_vision(self) -> bool:
+        return bool(self.video_analysis_api_key or self.gemini_api_key or self.openai_api_key)
+
+    @property
+    def has_embedding(self) -> bool:
+        return bool(self.embedding_base_url and self.embedding_api_key)
 
 
-def load_config() -> Config:
-    video_analysis_api_key = os.getenv("VIDEO_ANALYSIS_API_KEY", "")
-    html_gen_api_key = os.getenv("HTML_GEN_API_KEY", "")
+def load_config(project_root: Path | None = None) -> Config:
+    root = project_root or Path.cwd()
+    _ = root  # reserved for future project-local config.yaml support
 
-    if not video_analysis_api_key:
+    gemini_key = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    va_key = os.getenv("VIDEO_ANALYSIS_API_KEY", "")
+    embed_key = os.getenv("EMBEDDING_API_KEY", "")
+
+    if not gemini_key and not openai_key and not va_key and not embed_key:
         logger.warning(
-            "VIDEO_ANALYSIS_API_KEY is not set — video analysis will fail. "
-            "Add it to .env: VIDEO_ANALYSIS_API_KEY=<your_key>"
+            "No vision/embedding API key found. Asset Matcher will use keyword matching. "
+            "Set VIDEO_ANALYSIS_API_KEY (vision) or EMBEDDING_API_KEY (embeddings) in .env."
         )
-    if not html_gen_api_key:
-        logger.warning(
-            "HTML_GEN_API_KEY is not set — HTML generation will fail. "
-            "Add it to .env: HTML_GEN_API_KEY=<your_key>"
-        )
-
-    threshold_raw = os.getenv("SCENE_THRESHOLD", "0.35")
-    try:
-        threshold = float(threshold_raw)
-    except ValueError:
-        logger.warning(
-            "SCENE_THRESHOLD='%s' is not a valid float, using default 0.35",
-            threshold_raw,
-        )
-        threshold = 0.35
-
-    video_analysis_base_url = os.getenv("VIDEO_ANALYSIS_BASE_URL") or None
-    html_gen_base_url = os.getenv("HTML_GEN_BASE_URL") or None
-
-    # OpenAI SDK appends /chat/completions to base_url directly; the gateway's
-    # Vertex path requires /v1 to be present in base_url (e.g. …/vertex/v1).
-    if video_analysis_base_url and not video_analysis_base_url.rstrip("/").endswith("v1"):
-        logger.warning(
-            "VIDEO_ANALYSIS_BASE_URL='%s' does not end with /v1. "
-            "OpenAI SDK will call %s/chat/completions — ensure this matches your gateway. "
-            "Typical correct value: %s/v1",
-            video_analysis_base_url,
-            video_analysis_base_url.rstrip("/"),
-            video_analysis_base_url.rstrip("/"),
-        )
-
-    # Claude model names differ between gateway (global.anthropic.*) and direct API.
-    # Auto-select the right default so users only need to set BASE_URL.
-    default_html_model = (
-        "global.anthropic.claude-sonnet-4-6" if html_gen_base_url else "claude-sonnet-4-6"
-    )
 
     return Config(
-        video_analysis_base_url=video_analysis_base_url,
-        video_analysis_api_key=video_analysis_api_key,
+        gemini_api_key=gemini_key,
+        openai_api_key=openai_key,
+        figma_token=os.getenv("FIGMA_TOKEN", ""),
+        video_analysis_base_url=os.getenv("VIDEO_ANALYSIS_BASE_URL", ""),
+        video_analysis_api_key=va_key,
         video_analysis_model=os.getenv("VIDEO_ANALYSIS_MODEL", "gemini-2.5-flash"),
-        html_gen_base_url=html_gen_base_url,
-        html_gen_api_key=html_gen_api_key,
-        html_gen_model=os.getenv("HTML_GEN_MODEL", default_html_model),
-        pexels_api_key=os.getenv("PEXELS_API_KEY", ""),
-        scene_threshold=threshold,
+        embedding_base_url=os.getenv("EMBEDDING_BASE_URL", ""),
+        embedding_api_key=embed_key,
+        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
     )

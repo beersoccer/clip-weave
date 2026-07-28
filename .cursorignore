@@ -1,0 +1,5 @@
+# Keep project docs visible to Cursor (@ mentions, Agent, indexing).
+# Hierarchical Cursor Ignore is enabled, so parent workspace/.cursorignore
+# can still affect this project; negate docs here.
+!docs/
+!docs/**

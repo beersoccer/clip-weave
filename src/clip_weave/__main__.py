@@ -1,30 +1,21 @@
-import json
+"""clip-weave CLI — intent → HF workflow delegation."""
+
 import logging
 import sys
 from pathlib import Path
 
 import click
 
-from clip_weave.adapters.video_analyzer import VideoAnalysisError
 from clip_weave.config import load_config
-from clip_weave.pipeline import analyze, render
-from clip_weave.schemas.brand_assets import BrandAssets
-from clip_weave.schemas.shots import ShotsOutput
+from clip_weave.pipeline import run as pipeline_run, guard as pipeline_guard
 
 
 def _setup_logging() -> None:
     logging.basicConfig(
-        level=logging.WARNING,
+        level=logging.INFO,
         format="[%(levelname)s] %(name)s: %(message)s",
         stream=sys.stderr,
     )
-
-
-def _load_brand(brand_dir: str) -> BrandAssets:
-    p = Path(brand_dir) / "brand_assets.json"
-    if p.exists():
-        return BrandAssets.model_validate(json.loads(p.read_text()))
-    return BrandAssets(brand_name=Path(brand_dir).name)
 
 
 @click.group()
@@ -32,73 +23,86 @@ def cli():
     _setup_logging()
 
 
-@cli.command()
-@click.option("--video", required=True, help="Path to sample video")
-@click.option("--output", default="output/shots.json", help="Output shots.json path")
-def analyze_cmd(video: str, output: str):
+@cli.command("run")
+@click.option("--url", default=None, help="Website URL to capture")
+@click.option("--message", required=True, help="Core message (one sentence)")
+@click.option("--project", default=None, help="Project name (default: derived from URL/message)")
+@click.option("--videos-dir", default="videos", help="Root directory for video projects")
+@click.option("--length", default="30s", help="Video length (e.g. 15s, 30s, 60s)")
+@click.option("--workflow", default=None, help="Force a specific HF workflow")
+def run_cmd(url, message, project, videos_dir, length, workflow):
+    """Route a video request and prepare the HF project for delegation."""
     cfg = load_config()
-    out_path = Path(output)
-    try:
-        shots = analyze(video, cfg, output_dir=out_path.parent)
-    except VideoAnalysisError as exc:
-        click.echo(f"Error: video analysis failed — {exc}", err=True)
-        if exc.stderr:
-            click.echo(f"  FFmpeg stderr: {exc.stderr}", err=True)
+    project_name = project or _derive_project_name(url, message)
+    user_input = f"{message} {url or ''}".strip()
+    if workflow:
+        user_input = f"{workflow} {user_input}"
+
+    project_dir = pipeline_run(
+        user_input=user_input,
+        project_name=project_name,
+        videos_dir=Path(videos_dir),
+        message=message,
+        length=length,
+        cfg=cfg,
+    )
+    click.echo(f"Project ready: {project_dir}")
+
+
+@cli.command("guard")
+@click.argument("project_dir")
+def guard_cmd(project_dir):
+    """Run Rule Guard pre-flight on compositions in PROJECT_DIR."""
+    p = Path(project_dir)
+    compositions_dir = p / "compositions"
+    if not compositions_dir.exists():
+        click.echo(f"No compositions/ directory found in {p}", err=True)
         sys.exit(1)
-    click.echo(f"Analysis complete: {out_path} ({shots.shot_count} shots)")
-
-
-@cli.command()
-@click.option("--video", required=True)
-@click.option("--brand", required=True, help="Brand assets directory")
-@click.option("--mode", default="hyperframes", type=click.Choice(["hyperframes"]))
-@click.option("--html-model", default=None, help="Model name for HTML generation (overrides HTML_GEN_MODEL)")
-def run_cmd(video: str, brand: str, mode: str, html_model: str):
-    cfg = load_config()
-    if html_model:
-        cfg.html_gen_model = html_model
-    brand_assets = _load_brand(brand)
-    try:
-        shots = analyze(video, cfg)
-    except VideoAnalysisError as exc:
-        click.echo(f"Error: video analysis failed — {exc}", err=True)
-        if exc.stderr:
-            click.echo(f"  FFmpeg stderr: {exc.stderr}", err=True)
+    ok = pipeline_guard(compositions_dir, project_dir=p)
+    if ok:
+        click.echo("Rule Guard: all clear")
+    else:
+        click.echo("Rule Guard: violations need attention — see log above", err=True)
         sys.exit(1)
-    try:
-        output = render(shots, brand_assets, cfg)
-    except ValueError as exc:
-        click.echo(f"Error: rendering failed — {exc}", err=True)
-        sys.exit(1)
-    click.echo(f"Done: {output}")
 
 
-@cli.command()
-@click.option("--shots", required=True, help="Path to shots.json")
-@click.option("--brand", required=True)
-@click.option("--mode", default="hyperframes", type=click.Choice(["hyperframes"]))
-@click.option("--html-model", default=None, help="Model name for HTML generation (overrides HTML_GEN_MODEL)")
-def render_cmd(shots: str, brand: str, mode: str, html_model: str):
-    cfg = load_config()
-    if html_model:
-        cfg.html_gen_model = html_model
-    try:
-        shots_data = ShotsOutput.model_validate(json.loads(Path(shots).read_text()))
-    except Exception as exc:
-        click.echo(f"Error: could not load shots.json — {exc}", err=True)
-        sys.exit(1)
-    brand_assets = _load_brand(brand)
-    try:
-        output = render(shots_data, brand_assets, cfg)
-    except ValueError as exc:
-        click.echo(f"Error: rendering failed — {exc}", err=True)
-        sys.exit(1)
-    click.echo(f"Done: {output}")
+@cli.command("match-assets")
+@click.argument("project_dir")
+@click.option("--query", default=None, help="Override query text (default: BRIEF.md message)")
+def match_assets_cmd(project_dir, query):
+    """Run Asset Matcher on PROJECT_DIR capture/ assets."""
+    from clip_weave.adapters.asset_matcher import match_assets
+    p = Path(project_dir)
+    if not query:
+        brief = p / "BRIEF.md"
+        query = p.name
+        if brief.exists():
+            for line in brief.read_text().splitlines():
+                if line.startswith("message:"):
+                    query = line.split(":", 1)[1].strip().strip('"')
+                    break
+    results = match_assets(p, [query])
+    if results and results[0]:
+        click.echo(f"Top {len(results[0])} asset candidates for: {query!r}")
+        for i, asset in enumerate(results[0], 1):
+            click.echo(f"  {i}. {asset['filename']}")
+            click.echo(f"     {asset['description'][:100]}…")
+    else:
+        click.echo("No asset candidates found (check capture/extracted/asset-descriptions.md)")
 
 
-cli.add_command(analyze_cmd, name="analyze")
+def _derive_project_name(url: str | None, message: str) -> str:
+    import re
+    if url:
+        # e.g. https://xiaomiev.com/su7 → xiaomiev-su7
+        clean = re.sub(r"https?://", "", url).rstrip("/")
+        return re.sub(r"[^a-z0-9]+", "-", clean.lower())[:40]
+    return re.sub(r"[^a-z0-9]+", "-", message.lower())[:30]
+
+
 cli.add_command(run_cmd, name="run")
-cli.add_command(render_cmd, name="render")
+cli.add_command(guard_cmd, name="guard")
+cli.add_command(match_assets_cmd, name="match-assets")
 
 if __name__ == "__main__":
     cli()
