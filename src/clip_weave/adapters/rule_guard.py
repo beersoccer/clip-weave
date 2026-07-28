@@ -112,31 +112,10 @@ def _check_preserve_3d_filter(html: str, path: Path) -> list[Violation]:
     return violations
 
 
-def _fix_gsap_css_transform_conflict(html: str) -> str:
-    """Replace x:/y: with xPercent:/yPercent: inside GSAP call object literals only.
-
-    Scopes the substitution to the vars object of gsap.to/from/fromTo/set calls so
-    that non-GSAP JS objects (chart configs, SVG data, etc.) are not corrupted.
-    """
-    def _rewrite_vars(obj: str) -> str:
-        obj = re.sub(r"\bx:\s*(-?[\d.]+)", lambda m: f"xPercent: {m.group(1)}", obj)
-        obj = re.sub(r"\by:\s*(-?[\d.]+)", lambda m: f"yPercent: {m.group(1)}", obj)
-        return obj
-
-    def _replace_call(m: re.Match) -> str:
-        return m.group(1) + _rewrite_vars(m.group(2))
-
-    # Match (gsap|tl).to/from/fromTo/set(…, { … }) and rewrite only the vars object
-    return re.sub(
-        r"((?:gsap|tl)\s*\.\s*(?:to|from|fromTo|set)\s*\([^{]*?)(\{[^}]*\})",
-        _replace_call,
-        html,
-        flags=re.DOTALL,
-    )
-
-
-_FIXERS = {
-    "gsap_css_transform_conflict": _fix_gsap_css_transform_conflict,
+_FIXERS: dict = {
+    # gsap_css_transform_conflict: no auto-fix — converting x:/y: pixel values to
+    # xPercent:/yPercent: changes semantics. Manual fix: replace CSS
+    # `left: 50%; transform: translateX(-50%)` with `left: calc(50% - <half-width>px)`.
 }
 
 
