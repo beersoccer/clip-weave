@@ -1,60 +1,57 @@
 # clip-weave Provider 配置
 
-clip-weave 需要以下 API Key 才能使用所有功能。未配置的功能会优雅降级。
+两组环境变量相互独立，任意一组缺失只影响对应阶段，视频仍可正常生成。
 
-## 必需
+## Vision 增强（Phase 1）— 素材图像理解
 
-| Key | 用途 | 获取地址 |
-|-----|------|---------|
-| `GEMINI_API_KEY` | Asset Matcher embedding + HF `capture` 素材描述生成 | https://aistudio.google.com/app/apikey |
+Asset Matcher 调用企业 AI 网关的 `/chat/completions` 接口，为每张素材图生成高质量视觉描述。
 
-`GEMINI_API_KEY` 被 HyperFrames `capture` 命令和 clip-weave Asset Matcher **共用**，
-只需配置一次即可同时启用两个功能。
+| 变量 | 说明 |
+|------|------|
+| `VIDEO_ANALYSIS_BASE_URL` | 网关地址（需支持 `/chat/completions`） |
+| `VIDEO_ANALYSIS_API_KEY` | 网关认证 Key |
+| `VIDEO_ANALYSIS_MODEL` | 视觉模型名称（默认 `gemini-2.5-flash`） |
 
-## 可选
+未配置：跳过 Vision 增强，使用 capture 原始描述；不影响 Embedding 阶段。
 
-| Key | 用途 | 获取地址 |
-|-----|------|---------|
-| `OPENAI_API_KEY` | Asset Matcher 备用 embedding 提供商 | https://platform.openai.com/api-keys |
-| `HEYGEN_API_KEY` | HeyGen TTS 语音合成 | https://app.heygen.com/settings |
+## Embedding 语义检索（Phase 2）— 素材匹配
 
-## 配置方式（优先级从高到低）
+Asset Matcher 调用 OpenAI 兼容的 `/v1/embeddings` 接口，对 beat 查询和素材描述做语义相似度排序。
 
-### 方式 1：环境变量（推荐）
+| 变量 | 说明 |
+|------|------|
+| `EMBEDDING_BASE_URL` | Embedding 网关地址（需支持 `/v1/embeddings`，OpenAI 兼容） |
+| `EMBEDDING_API_KEY` | 网关认证 Key |
+| `EMBEDDING_MODEL` | Embedding 模型名称（默认 `text-embedding-3-small`） |
 
-```bash
-export GEMINI_API_KEY="your-key-here"
-export OPENAI_API_KEY="your-key-here"   # 可选
+未配置：自动降级为 BM25 关键词匹配；不影响 Vision 阶段。
 
-# 持久化（加入 ~/.zshrc 或 ~/.bashrc）
-echo 'export GEMINI_API_KEY="your-key-here"' >> ~/.zshrc
-```
+## HyperFrames capture（HF 直接读取）
 
-### 方式 2：项目根目录 `config.yaml`
+| 变量 | 说明 |
+|------|------|
+| `GEMINI_API_KEY` | HF capture 生成 asset-descriptions.md（clip-weave 不读取此 Key） |
+| `GEMINI_BASE_URL` | HF capture 的 Gemini 网关地址（可选，未设置则直连 Google） |
 
-```yaml
-# clip-weave/config.yaml
-providers:
-  embedding: gemini   # gemini | openai | local
-  vision: gemini      # gemini | openai
-  tts: heygen         # heygen | kokoro
-```
-
-`config.yaml` 不含 Key 本身，只指定使用哪个 provider。Key 仍需通过环境变量提供。
-
-### 方式 3：`.env` 文件（本地开发）
-
-复制 `.env.example` 为 `.env`，填入 Key：
+## 配置方式
 
 ```bash
+# 本地开发
 cp .env.example .env
-# 编辑 .env，填入真实 Key
+# 编辑 .env，填入各环境的实际值
+
+# CI / 生产（通过环境变量注入，无需 .env 文件）
+export VIDEO_ANALYSIS_BASE_URL="https://your-vision-gateway/v1/"
+export VIDEO_ANALYSIS_API_KEY="your-key"
+export EMBEDDING_BASE_URL="https://your-embed-gateway/v1/"
+export EMBEDDING_API_KEY="your-key"
 ```
 
-## 降级行为
+## 降级行为一览
 
-| 缺少 Key | 降级行为 |
+| 缺少配置 | 降级行为 |
 |---------|---------|
-| `GEMINI_API_KEY` 缺失 | Asset Matcher 改用关键词匹配（无向量检索）；HF capture 跳过 asset-descriptions.md 生成 |
-| `OPENAI_API_KEY` 缺失（且 Gemini 可用） | 无影响，Gemini 为默认 provider |
-| `HEYGEN_API_KEY` 缺失 | TTS 步骤跳过；视频无配音 |
+| `VIDEO_ANALYSIS_*` 未配置 | 跳过 Vision 增强；使用 capture 原始描述 |
+| `EMBEDDING_*` 未配置 | 跳过语义排序；使用 BM25 关键词匹配 |
+| `GEMINI_API_KEY` 未配置 | HF capture 跳过 asset-descriptions.md 生成 |
+| 三组均未配置 | 完全 BM25；视频仍可正常生成 |

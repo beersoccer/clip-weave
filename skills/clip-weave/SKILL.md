@@ -10,9 +10,28 @@ description: >
   skills first; then /hyperframes + its workflow skills do the actual building.
 ---
 
-> **Keep skills current:** `npx hyperframes skills update` before any creation session.
+> **Skills are pinned for stability. Do NOT run `npx hyperframes skills update` automatically.** Update only when the user explicitly requests it with a command like "更新技能" or "update skills". Ignoring this rule causes deployed agents to break mid-session when upstream skill changes are incompatible with the current project. Note: `npx hyperframes init` performs its own internal version check — that is framework-controlled and cannot be suppressed here.
 > **clip-weave is a front door to HyperFrames** — it generates `BRIEF.md` then hands off
 > to the appropriate `/hyperframes` workflow. It never rebuilds what HF already provides.
+
+## Installation (one command)
+
+Run this once from the clip-weave project root to install all dependencies — HyperFrames
+skills, the Python Rule Guard / Asset Matcher package, and optionally HeyGen audio:
+
+```bash
+bash scripts/install.sh
+```
+
+What it does:
+1. `npx hyperframes skills update` — installs/refreshes all HF skills to `~/.claude/skills/`
+2. `uv pip install -e ".[dev]"` — installs the Python package (Rule Guard, Asset Matcher)
+
+After install, confirm with:
+```bash
+uv run python -m clip_weave --help   # should list run / guard / match-assets
+npx hyperframes auth status          # signed in = audio enabled; signed out = silent mode
+```
 
 # clip-weave — intent interview + workflow router
 
@@ -120,13 +139,22 @@ Template: `references/brief-template.md`.
 After capture completes, run Asset Matcher before delegating to HF:
 
 ```bash
-python -m clip_weave match-assets "$PROJECT_DIR"
+uv run python -m clip_weave match-assets "$PROJECT_DIR"
 ```
 
-This pre-computes embeddings for `capture/extracted/asset-descriptions.md` and writes
-`asset_candidates` into each beat of `STORYBOARD.md` before the HF skill runs.
-Provider: configured via `GEMINI_API_KEY` (see `references/setup.md`).
-If key is absent, falls back to keyword matching.
+Three-phase pipeline (phases are independent — each degrades separately):
+
+1. **Vision enrichment** (`VIDEO_ANALYSIS_*`) — calls `/chat/completions` to generate rich visual
+   descriptions for each image, replacing DOM-derived stubs. Skipped if not configured.
+2. **Semantic embedding** (`EMBEDDING_*`) — calls `/v1/embeddings` (OpenAI-compatible) for
+   cosine-similarity ranking; catches synonyms and cross-language matches BM25 misses.
+   Skipped if not configured.
+3. **BM25 fallback** — always available, no config required.
+
+See `references/setup.md` for environment variable reference and degradation table.
+
+The filter step (project_factory.py) removes noise assets automatically after capture:
+favicons, QR codes, WhatsApp icons, hash-named SVG icon sprites, and images > 1.5 MB.
 
 ## 6. Delegate to HF workflow
 
@@ -143,20 +171,24 @@ frame rendering, lint, check, or render — these are entirely owned by HF skill
 
 ## 7. Rule Guard (post-composition)
 
+**Prerequisite:** `uv pip install -e .` in the clip-weave project root (done by `scripts/install.sh`).
+
 After each HF sub-agent writes a composition, run the Python pre-flight check:
 
 ```bash
-python -m clip_weave guard "$PROJECT_DIR/compositions"
+uv run python -m clip_weave guard "$PROJECT_DIR"
 ```
 
-Rule Guard checks 4 HF-specific rules before `npx check` (saves 10-30s per round):
-- `media_in_subcomposition` — grep for `<video>/<audio>` in compositions/*.html
-- `gsap_css_transform_conflict` — CSS transform + GSAP x/y on same element
-- `gsap_timeline_set_initial_hide` — gsap.set() on clip elements outside timeline
+Rule Guard checks 4 HF-specific rules (<1s, 0 tokens) before `npx check` (10-30s):
+- `media_in_subcomposition` — `<video>/<audio>` must not appear in composition HTML files
+- `gsap_css_transform_conflict` — CSS `transform: translateX/Y()` on element GSAP also animates.
+  **No auto-fix** (pixel→percent conversion would change visual semantics). Manual fix:
+  replace `left: 50%; transform: translateX(-50%)` with `left: calc(50% - <half-width>px)`.
+- `gsap_timeline_set_initial_hide` — `gsap.set()` at page-load scope (use `tl.set()` inside timeline)
 - `preserve-3d + filter` — filter on ancestor of preserve-3d element
 
-Known patterns → Fix Registry (deterministic Python fix, 0 tokens).
-Unknown errors → pass through to `npx hyperframes check`.
+Violations with no fixer → guard exits 1 and logs the manual fix. Always run Rule Guard BEFORE
+`npx hyperframes check` so known patterns are handled cheaply.
 
 ## Resume table
 

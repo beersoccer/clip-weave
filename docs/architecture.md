@@ -54,9 +54,8 @@ clip-weave 补位（HF 缺失或用户体验不足）：
        │
        ▼
 ③ Asset Matcher（clip-weave）
-   读 capture/extracted/asset-descriptions.md → 生成 embedding
-   为 STORYBOARD 每个 beat 检索 top-K 候选素材
-   写入 STORYBOARD.md 的 asset_candidates 字段
+   Vision 增强 asset-descriptions.md（VIDEO_ANALYSIS_* 网关）
+   BM25 top-K 检索 → 写入 STORYBOARD.md 的 asset_candidates 字段
        │
        ▼
 ④ 委托 Claude Code + HF Skill 执行
@@ -111,12 +110,12 @@ Rule Guard 在 Python 层跑，能拦截的错误绝不进入 `npx check`。
 
 **第 2 层：Fix Registry 确定性修复（无 LLM 参与）**
 
-| 错误模式 | 确定性修复 |
+| 错误模式 | 处理方式 |
 |--------|---------|
-| GSAP `x:` + CSS `translateX()` 共存 | 自动改 GSAP 为 `xPercent:` |
-| `<video>` 出现在 compositions/*.html（非 index.html 直接子元素）| 自动上提到 index.html 的根节点直接子元素 |
-| 页面加载时 `gsap.set(clipEl, ...)` 作用于后面场景的 clip（该 clip 不在 DOM）| 自动改为 `tl.set(clipEl, vars, data-time-in-value)` 放入 timeline |
-| `preserve-3d` 祖先带 `filter` | 自动把 filter 下移到叶子元素 |
+| GSAP `x/y:` + CSS `translateX/Y()` 共存 | **无自动修复**（pixel→percent 语义不等价）。报告违规行 + 手动修复模板：`left: calc(50% - <half-width>px)` 替换 `transform: translateX(-50%)` |
+| `<video>` 出现在 compositions/*.html | 报告位置；需手动上提到 index.html |
+| 页面加载时 `gsap.set()` 作用于后续场景的 clip | 报告；改用 `tl.set()` 放入 timeline |
+| `preserve-3d` 祖先带 `filter` | 报告；手动把 filter 下移到叶子元素 |
 
 命中已知模式 → Python 直接改 HTML → 跳过 LLM 修复回合。仅未知错误才回落到 HF skill。
 
@@ -130,12 +129,26 @@ Rule Guard 在 Python 层跑，能拦截的错误绝不进入 `npx check`。
 
 **问题：** `npx capture` 抓 100+ 张图，v1 版本只用 2 张。原因：agent 在长上下文里没系统读完 `asset-descriptions.md`，且 HF 无自动匹配。
 
-**方案：Asset Matcher 强制填充候选**
+**方案：Asset Matcher 三阶段流水线（业界最佳实践）**
 
-1. clip-weave 读 `capture/extracted/asset-descriptions.md`
-2. 一次性调 Gemini/OpenAI 为每张素材生成 embedding，缓存到 `capture/extracted/embeddings.json`
-3. STORYBOARD 生成前，clip-weave 为每个 beat 的意图文本算 embedding，检索 top-K 素材，写入 STORYBOARD.md 的 `asset_candidates` 字段
-4. HF skill 拿到的 STORYBOARD 里 `asset_candidates` 已经是筛选好的短列表（3-5 张），把"在 100+ 张图中自由发挥"变成"在候选中选"
+1. **Vision 描述增强**（依赖 `VIDEO_ANALYSIS_*`）：调企业网关的 `/chat/completions` 接口，对每张素材图生成高质量视觉描述，替换 capture 产出的 DOM 粗描述
+2. **Embedding 语义检索**（依赖 `EMBEDDING_*`）：调 OpenAI 兼容的 `/v1/embeddings` 接口，将 beat 查询和所有素材描述批量 embedding，cosine 相似度排序 — 能捕获 BM25 遗漏的同义词和跨语言语义（"专业团队" ↔ "professional advisory team"）
+3. **BM25 关键词兜底**：Embedding 不可用时自动降级，无需任何配置
+
+两个阶段**完全独立**，互不依赖：
+
+| 阶段 | 降级行为 |
+|------|---------|
+| Vision 增强不可用（`VIDEO_ANALYSIS_*` 未配置）| 跳过增强，使用 capture 原始描述；不影响 Embedding |
+| Embedding 不可用（`EMBEDDING_*` 未配置或端点故障）| 直接降级到 BM25；与 Vision 配置无关 |
+
+HF skill 拿到的 `asset_candidates` 是已排好序的 3–5 张候选。
+
+**图片过滤规则（优先级从高到低）**：
+1. 正向白名单：文件名含 `logo/brand/wordmark/trademark/emblem` → 无条件保留
+2. 噪声模式：favicon、QR 码、WhatsApp 图标、webpack hash-named sprite → 删除
+3. SVG 无大小限制：品牌 logo 常是 2–20 KB 矢量，不做大小过滤
+4. 栅格图片 > 1.5 MB → 删除（照片/横幅通常不适合直接用作品牌元素）
 
 ---
 
@@ -231,23 +244,35 @@ python -m clip_weave run \
 
 等价于路径 A，只是跳过对话，参数直接映射到 BRIEF.md frontmatter。
 
-### 5.4 Provider 配置（Asset Matcher 等 AI 模型选择）
+### 5.4 Provider 配置
 
-Provider 配置通过环境变量或项目根目录的 `config.yaml` 指定，两者均可，env var 优先级更高：
+clip-weave 通过以下环境变量配置 AI 模型，均在 `.env` 文件中设置：
 
-```yaml
-# config.yaml（放在 clip-weave 项目根目录，可选）
-providers:
-  embedding: gemini          # gemini | openai | local（asset matcher 用）
-  vision: gemini             # gemini | openai（asset-descriptions 补全用）
-  tts: heygen                # heygen | kokoro（本地，需 HF auth）
-```
+两组变量相互独立，任意一组缺失只影响对应阶段，不影响另一阶段。
 
-对应 env var：`GEMINI_API_KEY`、`OPENAI_API_KEY`。
+**Vision 增强（Phase 1）— 素材图像理解**
 
-**HF `capture` 命令本身已使用 `GEMINI_API_KEY`**（生成 asset-descriptions.md），
-clip-weave 的 Asset Matcher 复用同一个 key，无需额外配置。若 key 不存在，
-asset-descriptions.md 为空时 Asset Matcher 退化为无 embedding 的关键词匹配。
+| 变量 | 用途 | 默认值 |
+|------|------|--------|
+| `VIDEO_ANALYSIS_BASE_URL` | 企业 AI 网关地址（需支持 `/chat/completions`）| 空（跳过增强）|
+| `VIDEO_ANALYSIS_API_KEY` | 网关 Key | 空 |
+| `VIDEO_ANALYSIS_MODEL` | 视觉模型名称 | `gemini-2.5-flash` |
+
+**Embedding 语义检索（Phase 2）— 素材匹配**
+
+| 变量 | 用途 | 默认值 |
+|------|------|--------|
+| `EMBEDDING_BASE_URL` | OpenAI 兼容 Embedding 网关地址（需支持 `/v1/embeddings`）| 空（降级 BM25）|
+| `EMBEDDING_API_KEY` | 网关 Key | 空 |
+| `EMBEDDING_MODEL` | Embedding 模型名称 | `text-embedding-3-small` |
+
+**其他**
+
+| 变量 | 用途 | 默认值 |
+|------|------|--------|
+| `GEMINI_API_KEY` | HF capture 素材描述生成（由 HF 读取，非 clip-weave）| 空（降级无描述）|
+
+详见 `skills/clip-weave/references/setup.md`。
 
 ---
 
@@ -330,7 +355,7 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 |------|------|---------|------|
 | **P0** | 打通链路：意图 → HF autonomous 执行 | Intent Router；BRIEF.md 生成器；Project Factory（`init` + `capture` 封装）；Delegator；`skills/clip-weave/` 入口 skill | ✅ 完成 |
 | **P1** | 解决 lint 痛点 | 4 条 HF 高频规则检测器；4 条确定性 fixer；修复历史签名追踪 | ✅ 完成 |
-| **P2** | 提升素材利用率 | Asset Matcher（Gemini embedding + top-K 检索）；embedding 缓存 | ✅ 完成 |
+| **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + BM25 top-K 检索）；capture 噪声过滤 | ✅ 完成 |
 | **P3** | 写实镜头混合路径 | Kling image-to-video 封装；FFmpeg 合流；STORYBOARD `visual_type` 路由 | 🔲 待验证 |
 | **P4** | ViMax 全 AI 真实影像（可选） | `adapters/vimax.py`；screenplay 转换 | 🔲 P3 验证后 |
 
@@ -349,3 +374,81 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 | HF + ViMax | ~$5–15 | 全 AI 真实影像 |
 
 **Rule Guard 预计带来的节省**：拦截已知模式在 Python 层零 token 处理，长视频（10+ compositions）lint 环节 token 消耗预计降 30-50%。
+
+---
+
+## 10. 音频能力（后续增强计划）
+
+HyperFrames 原生支持 TTS 配音和 BGM 背景音乐，通过 `audio.mjs` 脚本统一管理。
+clip-weave 通过 `STORYBOARD.md` frontmatter 传递音频参数，不重造音频逻辑。
+
+### 10.1 HeyGen 音频（推荐 — 在线，支持中文）
+
+> **当前状态**：`api.heygen.com` 被企业内网屏蔽（curl timeout，HTTP 000）。HeyGen TTS/BGM 暂不可用。
+> API Key 已写入 `~/.heygen/credentials`，一旦网络放通（VPN 或 IT 白名单 `api.heygen.com:443`）立即可用，无需重新配置。
+
+HeyGen 提供高质量 TTS（含中文声线）和版权音乐库。需要帐号授权：
+
+```bash
+npx hyperframes auth login    # 浏览器 OAuth，凭证存于 ~/.heygen
+npx hyperframes auth status   # 显示 "signed in" = 音频已启用
+```
+
+> **注意**：`auth status` 未登录时退出码为 1，这是正常状态，不代表命令失败，不要用 `&&` 或 `set -e` 链接。
+
+登录后，`STORYBOARD.md` 中指定音频参数：
+
+```yaml
+music: ambient-corporate     # HeyGen 音乐库 mood 查询
+voice: Marcia                # 声线 id（列表：npx hyperframes tts --list）
+```
+
+- 中文配音建议优先使用 HeyGen 声线（质量显著高于 Kokoro）
+- BGM 采用 HeyGen 音乐库检索（非 AI 生成），复用同一 `~/.heygen` 凭证
+
+**验证步骤：**
+
+1. `npx hyperframes auth login` 完成浏览器授权
+2. `npx hyperframes auth status` 确认输出 "signed in"
+3. 在项目目录运行音频生成脚本（需先有 `SCRIPT.md` 和 `STORYBOARD.md`）：
+
+```bash
+SKILL_DIR=$(node -e "console.log(require('path').dirname(require.resolve('hyperframes/package.json')))")
+node "$SKILL_DIR/skills/product-launch-video/scripts/audio.mjs" \
+  --script ./SCRIPT.md \
+  --storyboard ./STORYBOARD.md \
+  --hyperframes . \
+  --out ./audio_meta.json \
+  --provider heygen
+```
+
+4. 检查 `audio_meta.json` 含 `bgm` 和 `voice_segments` 字段 → 验证通过
+
+### 10.2 Kokoro TTS（离线，英文为主）
+
+```bash
+pip install kokoro soundfile   # 核心依赖
+pip install misaki             # 可选：更好的音素化
+```
+
+声线命名前缀：`am_`/`bm_` = 男声，`af_`/`bf_` = 女声，`z` = 中文（效果有限）。
+
+### 10.3 静音视频（当前默认）
+
+`STORYBOARD.md` 顶部 YAML 块设置以下两项：
+
+```yaml
+music: none
+```
+
+同时**不创建 `SCRIPT.md`**。音频管线检测到此组合后完全跳过，不调用任何 TTS/BGM API。
+
+### 10.4 依赖汇总
+
+| 能力 | 依赖 | 配置方式 |
+|------|------|---------|
+| HeyGen TTS + BGM | `npx hyperframes auth login` | `~/.heygen` 凭证文件 |
+| Kokoro TTS | `pip install kokoro soundfile` | 无需额外配置 |
+| 语音时间戳同步 | HF `audio.mjs sync-durations` | 需先生成 `audio_meta.json` |
+
+音频能力完全属于 HyperFrames 层，clip-weave 不封装也不重造，仅通过 `STORYBOARD.md` 传递参数。
