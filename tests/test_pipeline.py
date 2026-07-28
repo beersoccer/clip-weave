@@ -102,18 +102,120 @@ def test_run_length_written_to_brief(tmp_path):
     assert "length: 60s" in brief
 
 
-def test_guard_gsap_fixer_does_not_corrupt_non_gsap_objects(tmp_path):
-    """GSAP fixer must not rewrite x:/y: in non-GSAP JS objects (regression)."""
-    from clip_weave.adapters.rule_guard import _fix_gsap_css_transform_conflict
+def test_guard_gsap_css_conflict_reported_without_auto_fix(tmp_path):
+    """gsap_css_transform_conflict is detected but not auto-fixed (semantic safety)."""
+    from clip_weave.adapters.rule_guard import scan
 
-    html = """<script>
-const chartConfig = { x: 50, y: 100, width: 200 };
-const svgData = [{ x: 10 }, { x: 20 }];
-gsap.to(".el", { x: 30, duration: 1 });
-</script>"""
-    result = _fix_gsap_css_transform_conflict(html)
-    # Non-GSAP objects must be untouched
-    assert "chartConfig = { x: 50" in result
-    assert "svgData = [{ x: 10 }" in result
-    # GSAP call must be rewritten
-    assert "xPercent: 30" in result
+    html = """<template>
+<style>.el { transform: translateX(-50%); }</style>
+<div data-hf-id="x" id="el" class="clip" data-start="0" data-duration="1" data-track-index="0"></div>
+<script>
+gsap.to("#el", { x: 30, duration: 1 });
+</script>
+</template>"""
+    f = tmp_path / "test.html"
+    f.write_text(html)
+    result = scan(tmp_path)
+    assert any(v.rule_id == "gsap_css_transform_conflict" for v in result.violations)
+    assert result.fixed == []   # no auto-fix applied
+
+
+# ── Image filtering ───────────────────────────────────────────────────────────
+
+def test_filter_removes_noise_but_keeps_logos(tmp_path):
+    from clip_weave.core.project_factory import _filter_capture_assets
+
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+
+    # Noise — should be removed
+    noise = [
+        "favicon.ico",
+        "wechat_qrcode.png",
+        "whatsapp.svg",
+        "svg-a1b2c3d4.svg",
+        "social-icons.png",
+        "loader.gif",
+    ]
+    # Logos — must be preserved even though some have short/simple names
+    logos = [
+        "logo.svg",           # classic logo filename
+        "brand-logo.png",     # brand in name
+        "noah-wordmark.svg",  # wordmark
+        "company_emblem.png", # emblem
+    ]
+    # Normal assets — not noise, not logo-flagged
+    normal = ["hero-banner.png", "team-photo.jpg"]
+
+    for name in noise + logos + normal:
+        (assets_dir / name).write_bytes(b"x" * 100)
+
+    _filter_capture_assets(assets_dir)
+
+    remaining = {f.name for f in assets_dir.iterdir()}
+    for name in logos + normal:
+        assert name in remaining, f"Expected {name} to be kept"
+    for name in noise:
+        assert name not in remaining, f"Expected {name} to be removed"
+
+
+def test_filter_keeps_small_svgs_unconditionally(tmp_path):
+    from clip_weave.core.project_factory import _filter_capture_assets
+
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    # An SVG with a plain name (not hash-named, no logo keyword) — keep it
+    (assets_dir / "arrow-right.svg").write_bytes(b"<svg/>" * 10)
+    # A hash-named SVG — remove
+    (assets_dir / "svg-deadbeef.svg").write_bytes(b"<svg/>")
+
+    _filter_capture_assets(assets_dir)
+
+    assert (assets_dir / "arrow-right.svg").exists()
+    assert not (assets_dir / "svg-deadbeef.svg").exists()
+
+
+# ── Asset Matcher ─────────────────────────────────────────────────────────────
+
+def test_asset_matcher_bm25_fallback(tmp_path):
+    """Without gateway config, should fall back to BM25 and return ranked results."""
+    from clip_weave.adapters.asset_matcher import match_assets
+    from clip_weave.config import Config
+
+    desc_file = tmp_path / "capture" / "extracted" / "asset-descriptions.md"
+    desc_file.parent.mkdir(parents=True)
+    desc_file.write_text(
+        "- team.jpg — professional executives in formal meeting room\n"
+        "- chart.png — bar chart showing revenue growth data\n"
+        "- office.jpg — modern corporate office interior\n"
+    )
+
+    cfg = Config()  # no gateway configured
+    results = match_assets(tmp_path, ["executive team meeting", "financial data"], top_k=2, cfg=cfg)
+
+    assert len(results) == 2
+    assert len(results[0]) > 0
+    # "team.jpg" should rank higher for the first query
+    assert results[0][0]["filename"] == "team.jpg"
+
+
+def test_asset_matcher_embedding_fallback_to_bm25(tmp_path, monkeypatch):
+    """When embedding endpoint fails, should silently fall back to BM25."""
+    from clip_weave.adapters import asset_matcher
+    from clip_weave.adapters.asset_matcher import match_assets
+    from clip_weave.config import Config
+
+    desc_file = tmp_path / "capture" / "extracted" / "asset-descriptions.md"
+    desc_file.parent.mkdir(parents=True)
+    desc_file.write_text("- logo.svg — gold and blue company logo\n")
+
+    # Simulate embedding gateway failure
+    monkeypatch.setattr(asset_matcher, "_call_embedding_gateway", lambda *a, **k: None)
+
+    cfg = Config(
+        embedding_base_url="https://embed.example.com/v1/",
+        embedding_api_key="test-key",
+    )
+    results = match_assets(tmp_path, ["brand identity"], top_k=1, cfg=cfg)
+    assert len(results) == 1
+    assert results[0][0]["filename"] == "logo.svg"
