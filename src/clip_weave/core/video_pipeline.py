@@ -75,6 +75,10 @@ def generate_clips(
     dry_run: bool = False,
     model: VideoModel | None = None,
     report: Reporter = logger.info,
+    prompt_overrides: dict[int, str] | None = None,
+    duration_overrides: dict[int, int] | None = None,
+    negative_overrides: dict[int, str] | None = None,
+    reference_overrides: dict[int, str] | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
     sb = parse_storyboard(storyboard_path)
@@ -85,17 +89,28 @@ def generate_clips(
 
     selected = _select(sb, frames)
     target_ratio = ratio or sb.aspect_ratio()
+    prompt_overrides = prompt_overrides or {}
+    duration_overrides = duration_overrides or {}
+    negative_overrides = negative_overrides or {}
+    reference_overrides = reference_overrides or {}
+
+    def prompt_for(frame: Frame) -> str:
+        # T2V-PROMPTS.md wins when present — that is the file the user edits.
+        return prompt_overrides.get(frame.index) or build_prompt(
+            sb, frame, include_voiceover=include_voiceover, style=style
+        )
 
     if dry_run:
         results = []
         for frame in selected:
-            prompt = build_prompt(sb, frame, include_voiceover=include_voiceover, style=style)
+            prompt = prompt_for(frame)
             results.append(
                 ClipResult(
                     index=frame.index,
                     title=frame.title,
                     prompt=prompt,
-                    duration=duration or int(frame.duration_seconds or 5),
+                    duration=duration or duration_overrides.get(frame.index)
+                    or int(frame.duration_seconds or 5),
                     state="dry-run",
                     extra={"ratio": target_ratio, "resolution": resolution},
                 )
@@ -112,8 +127,10 @@ def generate_clips(
 
     # ── submit ───────────────────────────────────────────────────────────────
     for frame in selected:
-        prompt = build_prompt(sb, frame, include_voiceover=include_voiceover, style=style)
-        secs = vm.clamp_duration(duration or frame.duration_seconds)
+        prompt = prompt_for(frame)
+        secs = vm.clamp_duration(
+            duration or duration_overrides.get(frame.index) or frame.duration_seconds
+        )
         result = ClipResult(
             index=frame.index,
             title=frame.title,
@@ -121,16 +138,22 @@ def generate_clips(
             duration=secs,
             extra={"ratio": target_ratio, "resolution": resolution, "model": vm.model},
         )
+        reference = reference_overrides.get(frame.index) or ""
         req = VideoRequest(
             prompt=prompt,
             duration=secs,
             ratio=target_ratio,
             resolution=resolution,
-            negative_prompt=frame_negative_prompt(frame),
+            negative_prompt=negative_overrides.get(frame.index) or frame_negative_prompt(frame),
             seed=seed,
             generate_audio=generate_audio,
             watermark=watermark,
+            # Only remote URLs work as a first frame; local capture paths need
+            # uploading first, so they are recorded but not sent.
+            image_url=reference if reference.startswith(("http://", "https://")) else None,
         )
+        if reference and not reference.startswith(("http://", "https://")):
+            result.extra["reference_asset"] = reference
         try:
             result.task_id = vm.submit(req)
             result.state = "running"
