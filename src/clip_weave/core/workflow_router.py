@@ -152,17 +152,18 @@ def classify(
         "temperature": 0,
     }
 
+    protocol = (os.getenv("ROUTER_PROTOCOL") or "auto").strip().lower()
     try:
-        import requests
-
-        resp = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        if protocol == "anthropic":
+            content = _call_anthropic(base_url, api_key, payload, timeout)
+        else:
+            try:
+                content = _call_openai(base_url, api_key, payload, timeout)
+            except _NotOpenAICompatible:
+                # Some gateway routes are Anthropic-native (`/v1/messages`) and 404 on
+                # `/chat/completions`. Retry in that dialect before giving up.
+                logger.info("%s is not OpenAI-compatible — retrying Anthropic /v1/messages", base_url)
+                content = _call_anthropic(base_url, api_key, payload, timeout)
     except Exception as exc:  # noqa: BLE001 - network/shape errors all degrade the same way
         logger.warning("Semantic routing failed (%s) — falling back to keyword routing", exc)
         return RouteDecision(fallback, "keyword-fallback", 0.0, f"LLM unavailable: {exc}"[:120])
@@ -177,6 +178,57 @@ def classify(
 
     workflow, confidence, reason = parsed
     return RouteDecision(workflow, "semantic", confidence, reason)
+
+
+class _NotOpenAICompatible(Exception):
+    """The route exists but does not speak OpenAI chat/completions."""
+
+
+def _call_openai(base_url: str, api_key: str, payload: dict, timeout: int) -> str:
+    import requests
+
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    if resp.status_code == 404:
+        raise _NotOpenAICompatible(f"{base_url}/chat/completions → 404")
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _call_anthropic(base_url: str, api_key: str, payload: dict, timeout: int) -> str:
+    """Anthropic Messages dialect: `system` is a top-level field, content is a list."""
+    import requests
+
+    messages = payload["messages"]
+    system = next((m["content"] for m in messages if m["role"] == "system"), "")
+    body = {
+        "model": payload["model"],
+        "max_tokens": payload.get("max_tokens", 1024),
+        "temperature": payload.get("temperature", 0),
+        "system": system,
+        "messages": [{"role": m["role"], "content": m["content"]}
+                     for m in messages if m["role"] != "system"],
+    }
+    # Avoid `/v1/v1/messages` when the configured base already carries the version.
+    root = re.sub(r"/v1$", "", base_url)
+    resp = requests.post(
+        f"{root}/v1/messages",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    blocks = resp.json().get("content") or []
+    return "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
 
 
 def _parse(content: str) -> tuple[str, float, str] | None:

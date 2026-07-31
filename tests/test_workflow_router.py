@@ -41,6 +41,8 @@ def gateway(monkeypatch):
 
 def _fake_post(content: str, monkeypatch):
     class _Resp:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
@@ -161,3 +163,39 @@ def test_route_without_gateway_is_deterministic(no_gateway):
     result = route("帮我做个产品宣传视频")
     assert result.workflow == "product-launch-video"
     assert result.routing_method == "keyword"
+
+
+def test_anthropic_route_is_used_when_openai_path_404s(gateway, monkeypatch):
+    """A Bedrock-style route 404s on /chat/completions; the classifier retries /v1/messages."""
+    import requests
+
+    calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(str(self.status_code))
+
+        def json(self):
+            return self._payload
+
+    def _post(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/chat/completions"):
+            return _Resp(404, {})
+        assert "system" in kwargs["json"]  # Anthropic dialect: system is top-level
+        return _Resp(200, {"content": [{"type": "text", "text": '{"workflow": "slideshow", "confidence": 0.7}'}]})
+
+    monkeypatch.setattr(requests, "post", _post)
+    decision = workflow_router.classify("做个 deck", "text", keyword_fallback="general-video")
+    assert decision.workflow == "slideshow"
+    assert decision.method == "semantic"
+    # `/v1` in the configured base is not duplicated into `/v1/v1/messages`.
+    assert calls == [
+        "http://gateway.test/v1/chat/completions",
+        "http://gateway.test/v1/messages",
+    ]
