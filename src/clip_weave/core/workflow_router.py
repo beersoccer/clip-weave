@@ -100,10 +100,13 @@ class RouteDecision:
 
 def _gateway() -> tuple[str, str, str] | None:
     """Return (base_url, api_key, model) from the first configured prefix."""
+    # VIDEO_ANALYSIS_* first: on our gateway that route is OpenAI-compatible
+    # (`/vertex/v1/chat/completions`), while HTML_GEN_* points at the Bedrock route,
+    # which speaks Anthropic-native `/v1/messages` and 404s on `/chat/completions`.
     for prefix, default_model in (
         ("ROUTER", ""),
-        ("HTML_GEN", ""),
         ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
+        ("HTML_GEN", ""),
     ):
         base = (os.getenv(f"{prefix}_BASE_URL") or "").strip()
         key = (os.getenv(f"{prefix}_API_KEY") or "").strip()
@@ -142,7 +145,10 @@ def classify(
                 "content": f"input_source: {source_type}\nrequest: {user_input.strip()[:2000]}",
             },
         ],
-        "max_tokens": 200,
+        # Generous cap: reasoning models spend hidden tokens before the JSON answer
+        # (gemini-2.5-flash measured ~490 reasoning tokens for this prompt), and a
+        # truncated reply would silently degrade to keyword routing.
+        "max_tokens": 1500,
         "temperature": 0,
     }
 
@@ -178,12 +184,18 @@ def _parse(content: str) -> tuple[str, float, str] | None:
     text = content.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    data: dict = {}
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            data = {}
+    if not data:
+        # Truncated answer (hit max_tokens mid-JSON) — salvage the workflow id if present.
+        salvaged = re.search(r'"workflow"\s*:\s*"([\w.-]+)"', text)
+        if not salvaged:
+            return None
+        data = {"workflow": salvaged.group(1), "confidence": 0.0, "reason": "truncated answer"}
 
     workflow = str(data.get("workflow", "")).strip()
     if workflow not in WORKFLOW_TAXONOMY:

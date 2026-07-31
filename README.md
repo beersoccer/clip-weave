@@ -241,10 +241,26 @@ python -m clip_weave guard <project_dir>
 
 在 `npx hyperframes check` 之前运行，检查 4 条 HF 特有规则；已知模式 Python 直接修复（0 LLM token）。
 
+### `route` — 查看意图路由结果（语义优先）
+
+```bash
+python -m clip_weave route "我们不做产品广告，只想讲清楚什么是向量数据库" --compare
+# keyword : product-launch-video      ← 关键字命中「产品」，判错
+# semantic: faceless-explainer        ← 语义判对
+#   method=semantic confidence=1.00
+```
+
+workflow 选择默认走语义分类（LLM 按 workflow 分类表判断意图），网关不可用或返回
+不可解析时自动退回关键字匹配，`--no-semantic` 可强制关键字。网关配置复用顺序：
+`ROUTER_*` → `VIDEO_ANALYSIS_*` → `HTML_GEN_*`。
+
 ### `match-assets` — Asset Matcher 单次调用
 
 ```bash
 python -m clip_weave match-assets <project_dir> [--query TEXT]
+
+# 逐帧验证：读 STORYBOARD.md 每帧 scene，打印 top-3 候选（不改 STORYBOARD.md）
+python -m clip_weave match-assets videos/xiaomi-su7-promo --from-storyboard
 ```
 
 ---
