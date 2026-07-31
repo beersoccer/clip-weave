@@ -48,6 +48,10 @@ class RoutingResult:
     message: str
     length: str = "30s"
     aspect: str = "1920x1080"
+    # How the workflow was picked: "semantic" / "keyword" / "keyword-fallback"
+    routing_method: str = "keyword"
+    routing_confidence: float = 0.0
+    routing_reason: str = ""
 
 
 def detect_source_type(
@@ -65,7 +69,8 @@ def detect_source_type(
     return "text", None
 
 
-def detect_workflow(user_input: str, source_type: str) -> WorkflowName:
+def detect_workflow_by_keywords(user_input: str, source_type: str) -> WorkflowName:
+    """Substring matching — the offline fallback for `detect_workflow`."""
     text_lower = user_input.lower()
     for keywords, workflow in _WORKFLOW_KEYWORDS:
         if any(kw.lower() in text_lower for kw in keywords):
@@ -75,6 +80,27 @@ def detect_workflow(user_input: str, source_type: str) -> WorkflowName:
     if source_type == "figma":
         return "product-launch-video"
     return "faceless-explainer"
+
+
+def detect_workflow(
+    user_input: str, source_type: str, *, semantic: bool = True
+) -> WorkflowName:
+    """Route to an HF workflow. Semantic (LLM) first, keywords as fallback."""
+    return detect_workflow_explained(user_input, source_type, semantic=semantic)[0]
+
+
+def detect_workflow_explained(
+    user_input: str, source_type: str, *, semantic: bool = True
+) -> tuple[WorkflowName, "RouteDecision"]:
+    """Same as `detect_workflow`, plus the decision record (method / confidence / reason)."""
+    from clip_weave.core.workflow_router import RouteDecision, classify
+
+    keyword_pick = detect_workflow_by_keywords(user_input, source_type)
+    if not semantic:
+        return keyword_pick, RouteDecision(keyword_pick, "keyword", 0.0, "semantic disabled")
+
+    decision = classify(user_input, source_type, keyword_fallback=keyword_pick)
+    return decision.workflow, decision  # type: ignore[return-value]
 
 
 def detect_mode(user_input: str) -> tuple[FlowMode, bool]:
@@ -93,9 +119,10 @@ def route(
     message: str = "",
     length: str = "30s",
     aspect: str = "1920x1080",
+    semantic: bool = True,
 ) -> RoutingResult:
     source_type, source_url = detect_source_type(user_input, uploaded_files)
-    workflow = detect_workflow(user_input, source_type)
+    workflow, decision = detect_workflow_explained(user_input, source_type, semantic=semantic)
     flow, storyboard = detect_mode(user_input)
     return RoutingResult(
         workflow=workflow,
@@ -106,6 +133,9 @@ def route(
         message=message or user_input[:120],
         length=length,
         aspect=aspect,
+        routing_method=decision.method,
+        routing_confidence=decision.confidence,
+        routing_reason=decision.reason,
     )
 
 
