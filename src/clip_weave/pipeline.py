@@ -136,12 +136,10 @@ def run(
 
 
 def guard(compositions_dir: Path, project_dir: Path | None = None) -> bool:
-    """Run Rule Guard on compositions_dir. Returns True if no unknown violations."""
+    """Run Rule Guard on compositions_dir. Returns True if no violations."""
     result = guard_scan(compositions_dir)
-    if result.fixed:
-        logger.info("Rule Guard fixed %d violation(s)", len(result.fixed))
     if result.unknown:
-        logger.warning("Rule Guard: %d unknown violation(s) need manual fix:", len(result.unknown))
+        logger.warning("Rule Guard: %d violation(s) need manual fix:", len(result.unknown))
         for v in result.unknown:
             logger.warning("  [%s] %s:%d — %s", v.rule_id, v.file.name, v.line, v.detail)
     if project_dir:
