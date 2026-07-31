@@ -60,8 +60,12 @@ def _inject_asset_candidates(project_dir: Path, cfg: Config | None = None) -> No
         if not candidates:
             updated_frames.append(ft)
             continue
+        # Score is recorded so consumers (T2V prompt builder, HF skill) can apply
+        # their own quality floor instead of trusting rank order blindly.
         candidate_str = "；".join(
-            f"{c['filename']} — {c.get('description', '')[:60].strip()}"
+            f"{c['filename']}"
+            + (f" ({c['score']:.2f})" if c.get("score") is not None else "")
+            + f" — {c.get('description', '')[:60].strip()}"
             for c in candidates[:3]
         )
         new_line = f"- asset_candidates: {candidate_str}"
