@@ -180,14 +180,22 @@ def test_build_prompt_style_replaces_global_theme(tmp_path):
     assert "小米 SU7" not in with_style
 
 
-def test_build_prompt_falls_back_to_narrative_then_title(tmp_path):
-    narrative_only = parse_storyboard(
+def test_build_prompt_falls_back_to_the_title_not_the_body(tmp_path):
+    """The frame body is an HTML build spec, so `scene:` falls back to the title.
+
+    This used to assert the body reached the prompt. That was the leak fixed in
+    `test_narrative_fallback_does_not_leak_gsap_internals` below — the body's
+    Scene lines name GSAP rules by id.
+    """
+    body_only = parse_storyboard(
         _write(tmp_path, "## Frame 1 — T\n\n一段叙述。\n", name="a.md")
     )
-    assert "一段叙述" in build_prompt(narrative_only, narrative_only.frames[0])
+    prompt = build_prompt(body_only, body_only.frames[0])
+    assert prompt == "T。"
+    assert "一段叙述" not in prompt
 
     bare = parse_storyboard(_write(tmp_path, "## Frame 1 — 只有标题\n", name="b.md"))
-    assert build_prompt(bare, bare.frames[0]) == "只有标题"
+    assert build_prompt(bare, bare.frames[0]) == "只有标题。"
 
 
 # ── Frame.asset_candidates ────────────────────────────────────────────────────
@@ -364,3 +372,54 @@ def test_direction_absent_yields_empty_string_and_empty_fields(tmp_path):
 
     assert sb.direction == ""
     assert sb.direction_field("Palette") == ""
+
+
+# ── build_prompt: the narrative fallback must not leak HTML internals ─────────
+
+# An HF frame's body IS its HTML build spec — frame-worker-core.md calls it "the
+# time-coded shot sequence … your build spec", and its Scene lines name GSAP
+# motion rules by id. That makes the body structurally wrong as a prompt for a
+# video model, so `scene:` now falls back to the frame title, never to the body.
+LEAKY_NARRATIVE = """---
+format: 1920x1080
+message: "theme"
+---
+
+## Frame 1 — Chassis
+- duration: 6s
+- blueprint: dataviz-countup
+- sfx: riser
+
+Scene 1 (0-2s): asset scales in (gsap-effects, spring-pop-entrance), counter counts up with power3.out.
+"""
+
+
+def test_narrative_fallback_does_not_leak_gsap_internals(tmp_path):
+    sb = parse_storyboard(_write(tmp_path, LEAKY_NARRATIVE))
+    prompt = build_prompt(sb, sb.frames[0])
+
+    for leaked in ("gsap-effects", "spring-pop-entrance", "power3.out", "Scene 1"):
+        assert leaked not in prompt, f"{leaked!r} leaked into the T2V prompt: {prompt!r}"
+
+
+def test_scene_less_frame_falls_back_to_its_title(tmp_path):
+    sb = parse_storyboard(_write(tmp_path, LEAKY_NARRATIVE))
+    prompt = build_prompt(sb, sb.frames[0])
+
+    assert prompt.startswith("Chassis")
+    assert "整体主题 / overall theme: theme" in prompt
+
+
+def test_scene_still_wins_over_the_title(tmp_path):
+    body = "## Frame 1 — Title\n- scene: 一辆红色轿车\n\nScene 1: gsap-effects noise.\n"
+    sb = parse_storyboard(_write(tmp_path, body))
+    prompt = build_prompt(sb, sb.frames[0])
+
+    assert "一辆红色轿车" in prompt
+    assert "gsap-effects" not in prompt
+    assert "Title" not in prompt
+
+
+def test_frame_with_neither_scene_nor_title_still_yields_something(tmp_path):
+    sb = parse_storyboard(_write(tmp_path, "## Frame 1\n- duration: 5s\n"))
+    assert build_prompt(sb, sb.frames[0]).strip() != ""

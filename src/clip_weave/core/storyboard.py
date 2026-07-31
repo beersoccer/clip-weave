@@ -40,20 +40,11 @@ _BULLET_RE = re.compile(r"^[-*]\s+([A-Za-z_][\w \-]*?)\s*:\s*(.*)$")
 # bare `key: value` line (the storyboards also use narrativeRole:, keyMessage:, …)
 _BARE_KV_RE = re.compile(r"^([A-Za-z_][\w\-]*)\s*:\s*(.+)$")
 
-# Metadata keys that describe *how the HTML frame animates*. They are noise for
-# a generative video model, so they are kept out of the built prompt.
-_MOTION_KEYS = {
-    "blueprint",
-    "src",
-    "status",
-    "poster",
-    "sfx",
-    "roles",
-    "focal",
-    "asset_candidates",
-    "transition_in",
-    "transition",
-}
+# NOTE: there used to be a `_MOTION_KEYS` denylist here, paired with a comment in
+# `build_prompt` claiming it filtered motion metadata out of the prompt. Nothing
+# ever read it — the filtering was never implemented. `build_prompt` keeps motion
+# metadata out by reading an allowlist of shot-describing keys instead, so a
+# denylist is not needed. Do not reintroduce one.
 
 _ALIASES = {
     "description": "scene",
@@ -316,17 +307,28 @@ def build_prompt(
 ) -> str:
     """Turn one storyboard frame into a single text-to-video prompt.
 
-    Motion-implementation metadata (`blueprint`, `roles`, `sfx`, `src`, GSAP
-    scene beats) is deliberately dropped — it describes an HTML composition,
-    not a filmed shot. What survives: the shot description, the narrative
-    intent, the key message, plus global style direction.
+    Only keys that describe the *shot* are read: `scene`, `narrativeRole` /
+    `keyMessage`, `beat`, and the global message or style. Motion-implementation
+    metadata (`blueprint`, `roles`, `sfx`, `src`) is never read, so it cannot
+    reach the model.
+
+    The frame BODY is not read either, and that is deliberate. HF's frame
+    contract (`hyperframes-core/references/frame-worker-core.md`) defines the
+    body as "the time-coded shot sequence … your build spec", whose Scene lines
+    name GSAP motion rules by id (`spring-pop-entrance`, `power3.out`). It is an
+    HTML build spec, not a description of a filmed shot — feeding it to a video
+    model sends implementation identifiers the model then tries to render. So a
+    frame without `scene:` falls back to its title, which is short but clean.
+
+    This is the fallback path. `core/t2v_prompt.py` is the primary one: it
+    generates a `T2V-PROMPTS.md` the user edits, and that file wins when present.
     """
     parts: list[str] = []
 
     if frame.scene:
         parts.append(frame.scene)
-    elif frame.narrative:
-        parts.append(frame.narrative.split("\n\n")[0])
+    elif frame.title:
+        parts.append(frame.title)
 
     for key in ("narrativeRole", "narrativerole", "keyMessage", "keymessage"):
         val = frame.meta.get(key)
@@ -345,7 +347,6 @@ def build_prompt(
     elif sb.message:
         parts.append(f"整体主题 / overall theme: {sb.message}")
 
-    # Drop motion keys if they leaked into `parts` via the narrative fallback.
     prompt = "。".join(p.strip().rstrip("。.") for p in parts if p and p.strip())
     return prompt.strip() + "。" if prompt else (frame.title or "video shot")
 
