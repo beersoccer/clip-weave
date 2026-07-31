@@ -69,10 +69,40 @@ def guard_cmd(project_dir):
 @cli.command("match-assets")
 @click.argument("project_dir")
 @click.option("--query", default=None, help="Override query text (default: BRIEF.md message)")
-def match_assets_cmd(project_dir, query):
+@click.option(
+    "--from-storyboard",
+    is_flag=True,
+    help="Match every frame's scene: line and print the ranking (does not modify STORYBOARD.md)",
+)
+def match_assets_cmd(project_dir, query, from_storyboard):
     """Run Asset Matcher on PROJECT_DIR capture/ assets."""
     from clip_weave.adapters.asset_matcher import match_assets
     p = Path(project_dir)
+
+    if from_storyboard:
+        from clip_weave.core.storyboard import parse_storyboard
+
+        sb_path = p / "STORYBOARD.md"
+        if not sb_path.exists():
+            click.echo(f"No STORYBOARD.md in {p}", err=True)
+            sys.exit(1)
+        sb = parse_storyboard(sb_path)
+        frames = [f for f in sb.frames if f.scene]
+        if not frames:
+            click.echo("No frames with a `scene:` field found", err=True)
+            sys.exit(1)
+        rankings = match_assets(p, [f.scene for f in frames])
+        for frame, ranked in zip(frames, rankings):
+            click.echo(f"\nFrame {frame.index} — {frame.title}")
+            click.echo(f"  query: {frame.scene[:90]}")
+            if not ranked:
+                click.echo("  (no candidates — check capture/extracted/asset-descriptions.md)")
+                continue
+            for rank, asset in enumerate(ranked[:3], 1):
+                click.echo(f"  {rank}. {asset['filename']}")
+                click.echo(f"     {asset.get('description', '')[:100]}")
+        return
+
     if not query:
         brief = p / "BRIEF.md"
         query = p.name
@@ -89,6 +119,36 @@ def match_assets_cmd(project_dir, query):
             click.echo(f"     {asset['description'][:100]}…")
     else:
         click.echo("No asset candidates found (check capture/extracted/asset-descriptions.md)")
+
+
+@cli.command("route")
+@click.argument("message")
+@click.option("--url", default=None, help="Include a source URL in the routing input")
+@click.option("--no-semantic", is_flag=True, help="Keyword routing only (offline behaviour)")
+@click.option("--compare", is_flag=True, help="Show semantic and keyword picks side by side")
+def route_cmd(message, url, no_semantic, compare):
+    """Show which HF workflow MESSAGE routes to, and why."""
+    from clip_weave.core.intent_router import (
+        detect_source_type,
+        detect_workflow_by_keywords,
+        detect_workflow_explained,
+    )
+
+    user_input = f"{message} {url or ''}".strip()
+    source_type, source_url = detect_source_type(user_input)
+
+    if compare or no_semantic:
+        kw = detect_workflow_by_keywords(user_input, source_type)
+        click.echo(f"keyword : {kw}")
+        if no_semantic:
+            return
+
+    workflow, decision = detect_workflow_explained(user_input, source_type)
+    click.echo(f"semantic: {workflow}")
+    click.echo(f"  method={decision.method} confidence={decision.confidence:.2f}")
+    if decision.reason:
+        click.echo(f"  reason={decision.reason}")
+    click.echo(f"  source_type={source_type}" + (f" url={source_url}" if source_url else ""))
 
 
 @cli.command("gen-video")
@@ -197,6 +257,7 @@ cli.add_command(run_cmd, name="run")
 cli.add_command(guard_cmd, name="guard")
 cli.add_command(match_assets_cmd, name="match-assets")
 cli.add_command(gen_video_cmd, name="gen-video")
+cli.add_command(route_cmd, name="route")
 
 if __name__ == "__main__":
     cli()
