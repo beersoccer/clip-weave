@@ -86,6 +86,43 @@ class Frame:
     def duration_seconds(self) -> float | None:
         return _parse_duration(self.meta.get("duration"))
 
+    def asset_candidates(self) -> list[dict[str, Any]]:
+        """Assets the Asset Matcher already picked for this frame — no re-analysis.
+
+        Written by `pipeline._inject_asset_candidates` as
+        `- asset_candidates: a.png (0.62) — desc；b.mp4 (0.55) — desc`
+        (the score is present only for storyboards written after scoring landed).
+        """
+        raw = self.meta.get("asset_candidates", "")
+        out: list[dict[str, Any]] = []
+        for chunk in re.split(r"[；;]", raw):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            # Filenames contain hyphens (20-1.png), so only a *spaced* dash or an
+            # em/en dash separates the filename from its description.
+            m = re.match(
+                r"^(?P<file>\S+?)\s*(?:\((?P<score>[0-9.]+)\))?\s*(?:[—–]|\s-\s)\s*(?P<desc>.*)$",
+                chunk,
+            )
+            if m:
+                out.append({
+                    "filename": m.group("file").strip(),
+                    "score": float(m.group("score")) if m.group("score") else None,
+                    "description": m.group("desc").strip(),
+                })
+            else:
+                out.append({"filename": chunk, "score": None, "description": ""})
+        return out
+
+    def focal_asset(self) -> str | None:
+        """The asset HF itself designated as the frame's hero (`focal:` / first role)."""
+        focal = self.meta.get("focal", "").strip()
+        if focal:
+            return focal.split()[0].strip().rstrip(",;")
+        candidates = self.asset_candidates()
+        return candidates[0]["filename"] if candidates else None
+
     def slug(self) -> str:
         base = self.title or self.scene or f"frame-{self.index}"
         slug = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "-", base).strip("-").lower()
@@ -98,6 +135,8 @@ class Storyboard:
     globals: dict[str, Any] = field(default_factory=dict)
     frames: list[Frame] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: the free-form "Video direction" block between frontmatter and the first frame
+    direction: str = ""
 
     @property
     def format(self) -> str:
@@ -106,6 +145,26 @@ class Storyboard:
     @property
     def message(self) -> str:
         return str(self.globals.get("message", "") or "")
+
+    def direction_field(self, label: str) -> str:
+        """Pull one labelled line out of the Video direction block.
+
+        Handles both `**Palette** (…):` headed lists and inline
+        `**Negative list**: no X; no Y` forms.
+        """
+        if not self.direction:
+            return ""
+        pattern = re.compile(
+            rf"\*\*{re.escape(label)}\*\*[^:：\n]*[:：]?\s*(.*?)(?=\n\s*\n|\n\*\*|\Z)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        m = pattern.search(self.direction)
+        if not m:
+            return ""
+        body = m.group(1)
+        body = re.sub(r"`([^`]*)`", r"\1", body)          # drop code ticks
+        body = re.sub(r"^\s*[-*]\s*", "", body, flags=re.MULTILINE)
+        return re.sub(r"\s*\n\s*", "; ", body).strip(" ;")
 
     def aspect_ratio(self) -> str:
         """`1920x1080` → `16:9`. Defaults to 16:9 when unparseable."""
@@ -151,6 +210,7 @@ def parse_storyboard(path: str | Path) -> Storyboard:
 
     current: Frame | None = None
     narrative_lines: list[str] = []
+    preamble_lines: list[str] = []
     in_meta = True
 
     def close() -> None:
@@ -180,6 +240,10 @@ def parse_storyboard(path: str | Path) -> Storyboard:
             continue
 
         if current is None:
+            # Everything before the first frame is the global "Video direction" block:
+            # palette, motion grammar, rhythm, negative list. Style gold for T2V.
+            if not sb.frames:
+                preamble_lines.append(line.rstrip())
             continue
 
         bullet = _BULLET_RE.match(stripped)
@@ -204,6 +268,7 @@ def parse_storyboard(path: str | Path) -> Storyboard:
 
     close()
 
+    sb.direction = "\n".join(preamble_lines).strip()
     if not sb.frames:
         sb.warnings.append("no `## Frame N` sections found")
     return sb
