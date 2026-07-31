@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from clip_weave.adapters.hyperframes import (
-    HyperFramesError, init, capture, lint, check, render,
+    HyperFramesError, init, capture, lint, check, check_full, render,
 )
 
 
@@ -82,3 +82,36 @@ def test_render_returns_output_path(tmp_path):
     with patch("clip_weave.adapters.hyperframes.subprocess.run", return_value=_ok()):
         result = render(tmp_path, output=out)
     assert result == out
+
+
+def test_check_single_file_warns_about_reduced_coverage(tmp_path, caplog):
+    import logging
+
+    comp = tmp_path / "compositions" / "01-hero.html"
+    comp.parent.mkdir(parents=True)
+    comp.write_text("<template></template>")
+    with patch("clip_weave.adapters.hyperframes.subprocess.run",
+               return_value=MagicMock(returncode=0, stdout="pass", stderr="")):
+        with caplog.at_level(logging.WARNING, logger="clip_weave.adapters.hyperframes"):
+            check(tmp_path, file=comp)
+    assert "project-level" in caplog.text
+    assert "media_in_subcomposition" in caplog.text
+
+
+def test_check_full_does_not_warn(tmp_path, caplog):
+    import logging
+
+    with patch("clip_weave.adapters.hyperframes.subprocess.run",
+               return_value=MagicMock(returncode=0, stdout="pass", stderr="")):
+        with caplog.at_level(logging.WARNING, logger="clip_weave.adapters.hyperframes"):
+            ok, _ = check_full(tmp_path)
+    assert ok is True
+    assert "project-level" not in caplog.text
+
+
+def test_check_full_passes_no_file_argument(tmp_path):
+    with patch("clip_weave.adapters.hyperframes.subprocess.run",
+               return_value=MagicMock(returncode=0, stdout="", stderr="")) as mock_run:
+        check_full(tmp_path)
+    cmd = mock_run.call_args[0][0]
+    assert cmd == ["npx", "hyperframes", "check"]

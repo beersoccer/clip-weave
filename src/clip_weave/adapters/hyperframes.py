@@ -78,10 +78,29 @@ def lint(project_dir: Path, file: Path | None = None) -> tuple[bool, str]:
         return False, "lint timed out"
 
 
+# `npx hyperframes check <file>` passes an explicit lint entry. HF then treats
+# that file as the ROOT composition: packages/lint/src/project.ts:165 skips the
+# compositions/ walk and never sets `isSubComposition`, which silently disables
+# `media_in_subcomposition` (media.ts:349 returns early without it) along with
+# every project-level check (missing/empty sub-composition, duplicate
+# composition ids, duplicate audio tracks, missing local assets, HEVC notes).
+# Fast to iterate with, but not a substitute for a full pass.
+_SINGLE_FILE_COVERAGE_WARNING = (
+    "check(file=…) runs HF lint with an explicit entry: media_in_subcomposition "
+    "and all project-level checks are skipped. Use it for iteration only — run "
+    "check_full() before render."
+)
+
+
 def check(project_dir: Path, file: Path | None = None) -> tuple[bool, str]:
-    """npx hyperframes check [file] — returns (ok, output). 10-30s per call."""
+    """npx hyperframes check [file] — returns (ok, output). 10-30s per call.
+
+    Passing `file` narrows the run and loses coverage; see
+    `_SINGLE_FILE_COVERAGE_WARNING`. Prefer `check_full()` before rendering.
+    """
     cmd = ["npx", "hyperframes", "check"]
     if file:
+        logger.warning("%s", _SINGLE_FILE_COVERAGE_WARNING)
         cmd.append(str(file.relative_to(project_dir)))
     try:
         result = subprocess.run(
@@ -95,6 +114,15 @@ def check(project_dir: Path, file: Path | None = None) -> tuple[bool, str]:
         return result.returncode == 0, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return False, f"check timed out after {_TIMEOUT_CHECK}s"
+
+
+def check_full(project_dir: Path) -> tuple[bool, str]:
+    """Full-project `npx hyperframes check` — the only pass with full coverage.
+
+    Exists so callers can state the intent explicitly; a bare `check(dir)` is
+    equivalent but reads as if a narrowed run would do.
+    """
+    return check(project_dir)
 
 
 def render(project_dir: Path, output: Path | None = None, quality: str = "high") -> Path:
