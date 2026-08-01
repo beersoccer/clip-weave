@@ -283,6 +283,21 @@ def gen_video_cmd(
         include_audio=generate_audio,
     )
     click.echo(f"{'wrote' if created else 'using'} {prompts_path}")
+    if not created and not regenerate_prompts:
+        ignored_flags = [
+            name for name, value in (
+                ("--style", style),
+                ("--include-voiceover", include_voiceover),
+                ("--generate-audio", generate_audio),
+            )
+            if value
+        ]
+        if ignored_flags:
+            click.echo(
+                f"  注意：{', '.join(ignored_flags)} 对已存在的 {prompts_path.name} 不生效——"
+                "该文件已生成的提示词优先。用 --regenerate-prompts 从 STORYBOARD.md 重建"
+                "（会丢弃手工编辑），或直接编辑该文件。"
+            )
     flagged = [s.index for s in doc.specs if s.needs_review]
     if flagged:
         click.echo(
