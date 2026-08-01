@@ -279,11 +279,24 @@ def _style_line(palette: str, motion: str) -> str:
     return "; ".join(bits)
 
 
-# GSAP/motion vocabulary that means nothing to a video model. Matches both a
-# bare token (`power3.out`, `spring-pop-entrance`) and one embedded in a longer
-# hyphenated/dotted identifier, so it must be word-bounded on a non-identifier
-# character rather than \b (which does not treat `.`/`-` as boundaries).
-_GSAP_VOCAB = r"(?:gsap[\w.\-]*|power\d\.\w+|spring-pop[\w-]*|sine-wave[\w-]*|stagger\w*|scaleX\w*|tween\w*)"
+# GSAP/motion vocabulary that means nothing to a video model, used by the
+# PARENTHETICAL pass: whole `(...)`/backtick asides get dropped if they
+# CONTAIN any of this vocabulary, so it's safe to include generic-looking
+# words here (`stagger`, `scaleX`) — a parenthetical aside in a storyboard is
+# reliably implementation jargon, never ordinary prose.
+_GSAP_VOCAB_PAREN = (
+    r"(?:gsap[\w.\-]*|power\d\.\w+|spring-pop[\w-]*|sine-wave[\w-]*|"
+    r"stagger\w*|scaleX\w*|tween\w*)"
+)
+
+# Narrower vocabulary for the BARE-TOKEN pass, which deletes a match wherever
+# it sits in a sentence, not just inside brackets. Only tokens that are
+# unambiguous even out of context belong here: `stagger` and `scaleX` are
+# ordinary-looking English/identifier fragments ("actors stagger across the
+# stage", "value scaleXform") and must NOT be included, or the pass deletes
+# real words/identifier substrings. `tween` is excluded too since it's a
+# real (if informal) English word ("the tween demographic").
+_GSAP_VOCAB_BARE = r"(?:gsap[\w.\-]*|power\d\.\w+|spring-pop[\w-]*|sine-wave[\w-]*)"
 
 
 def _clean(text: str) -> str:
@@ -292,12 +305,19 @@ def _clean(text: str) -> str:
     Two passes: first delete an entire parenthetical/backtick span that
     CONTAINS the vocabulary (preserves the original "drop the whole aside"
     behavior for `(gsap-effects, spring-pop-entrance)`), then delete any
-    remaining bare occurrence of the vocabulary that was never bracketed at
-    all (`power3.out` sitting directly in a sentence).
+    remaining bare occurrence of the narrower vocabulary that was never
+    bracketed at all (`power3.out` sitting directly in a sentence).
+
+    The bare-token pass is bounded on a non-identifier character rather than
+    `\\b` not because `\\b` fails to treat `.`/`-` as boundaries (it does —
+    both are non-word characters in Python's `re`), but because we want the
+    OPPOSITE: `-` must NOT count as a boundary inside a compound word, so
+    that `co-power3.out` or `pre-tween` (jargon fused onto a hyphen prefix)
+    are left alone instead of being mangled into `co-` / `pre-`.
     """
-    text = re.sub(rf"\([^)]*{_GSAP_VOCAB}[^)]*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(rf"\([^)]*{_GSAP_VOCAB_PAREN}[^)]*\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"`[^`]*`", "", text)
-    text = re.sub(rf"(?<![\w.\-]){_GSAP_VOCAB}(?![\w])", "", text, flags=re.IGNORECASE)
+    text = re.sub(rf"(?<![\w.\-]){_GSAP_VOCAB_BARE}(?![\w])", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 

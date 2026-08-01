@@ -11,6 +11,7 @@ from clip_weave.core.t2v_prompt import (
     parse_markdown,
     render_markdown,
 )
+from clip_weave.core.t2v_prompt import _clean
 
 STORYBOARD = textwrap.dedent(
     """\
@@ -159,6 +160,25 @@ Scene 1 (0-2s): asset scales in (gsap-effects, spring-pop-entrance), counter cou
 
     for leaked in ("power3.out", "gsap-effects", "spring-pop-entrance"):
         assert leaked not in scene, f"{leaked!r} leaked into the T2V scene slot: {scene!r}"
+
+    # Not just "the jargon is gone" — the surrounding legitimate content
+    # must survive. A test that only checks absence would still pass if
+    # _clean() became arbitrarily more destructive.
+    assert "asset scales in" in scene
+    assert "counter counts up" in scene
+
+
+def test_clean_does_not_delete_ordinary_words_that_look_like_vocab():
+    """Ordinary English/identifiers that happen to contain GSAP-ish substrings
+    must survive _clean(). This is the regression for the over-match the
+    reviewer found: a bare-token pass that includes generic words like
+    `stagger`/`scaleX` deletes real prose, not just jargon.
+    """
+    sentence = "The actors stagger across the stage in disbelief."
+    assert _clean(sentence) == sentence
+
+    identifier_case = "value scaleXform"
+    assert _clean(identifier_case) == identifier_case
 
 
 def test_manual_edits_survive_regeneration_guard(tmp_path):
