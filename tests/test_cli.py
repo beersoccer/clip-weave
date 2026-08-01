@@ -60,3 +60,98 @@ def test_guard_command_no_compositions_dir(tmp_path):
     result = runner.invoke(cli, ["guard", str(tmp_path)])
     assert result.exit_code == 1
     assert "No compositions/" in result.output
+
+
+def test_gen_video_warns_when_style_flag_will_be_ignored(tmp_path):
+    """--style is silently ineffective once T2V-PROMPTS.md already exists and
+    --regenerate-prompts was not passed — the operator must be told, not left
+    to wonder why the flag had no effect."""
+    storyboard = tmp_path / "STORYBOARD.md"
+    storyboard.write_text(
+        "---\nformat: 1920x1080\n---\n\n## Frame 1\n- scene: x\n- duration: 5s\n",
+        encoding="utf-8",
+    )
+
+    class FakeSpec:
+        index = 1
+        needs_review = False
+        notes = ""
+
+    class FakeDoc:
+        specs = [FakeSpec()]
+
+    runner = CliRunner()
+    with patch(
+        "clip_weave.core.t2v_prompt.load_or_create",
+        return_value=(FakeDoc(), tmp_path / "T2V-PROMPTS.md", False),  # created=False
+    ), patch("clip_weave.core.t2v_prompt.literal_prompt", return_value="p"):
+        result = runner.invoke(
+            cli,
+            ["gen-video", str(storyboard), "--provider", "doubao", "--style", "35mm film",
+             "--dry-run"],
+        )
+
+    assert "--style" in result.output
+    assert "T2V-PROMPTS.md" in result.output
+
+
+def test_gen_video_no_warning_when_prompts_file_is_freshly_created(tmp_path):
+    """The warning must only fire when the flag is actually being ignored —
+    a fresh file means build_doc() DID see the flag, so no warning is needed."""
+    storyboard = tmp_path / "STORYBOARD.md"
+    storyboard.write_text(
+        "---\nformat: 1920x1080\n---\n\n## Frame 1\n- scene: x\n- duration: 5s\n",
+        encoding="utf-8",
+    )
+
+    class FakeSpec:
+        index = 1
+        needs_review = False
+        notes = ""
+
+    class FakeDoc:
+        specs = [FakeSpec()]
+
+    runner = CliRunner()
+    with patch(
+        "clip_weave.core.t2v_prompt.load_or_create",
+        return_value=(FakeDoc(), tmp_path / "T2V-PROMPTS.md", True),  # created=True
+    ), patch("clip_weave.core.t2v_prompt.literal_prompt", return_value="p"):
+        result = runner.invoke(
+            cli,
+            ["gen-video", str(storyboard), "--provider", "doubao", "--style", "35mm film",
+             "--dry-run"],
+        )
+
+    assert "--style" not in result.output
+
+
+def test_gen_video_no_warning_when_no_relevant_flags_passed(tmp_path):
+    """No style/voiceover/audio flags passed at all → nothing to warn about,
+    even if the prompts file already existed."""
+    storyboard = tmp_path / "STORYBOARD.md"
+    storyboard.write_text(
+        "---\nformat: 1920x1080\n---\n\n## Frame 1\n- scene: x\n- duration: 5s\n",
+        encoding="utf-8",
+    )
+
+    class FakeSpec:
+        index = 1
+        needs_review = False
+        notes = ""
+
+    class FakeDoc:
+        specs = [FakeSpec()]
+
+    runner = CliRunner()
+    with patch(
+        "clip_weave.core.t2v_prompt.load_or_create",
+        return_value=(FakeDoc(), tmp_path / "T2V-PROMPTS.md", False),
+    ), patch("clip_weave.core.t2v_prompt.literal_prompt", return_value="p"):
+        result = runner.invoke(
+            cli, ["gen-video", str(storyboard), "--provider", "doubao", "--dry-run"]
+        )
+
+    assert "--style" not in result.output
+    assert "--include-voiceover" not in result.output
+    assert "--generate-audio" not in result.output

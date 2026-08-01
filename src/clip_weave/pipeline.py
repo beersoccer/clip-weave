@@ -60,8 +60,12 @@ def _inject_asset_candidates(project_dir: Path, cfg: Config | None = None) -> No
         if not candidates:
             updated_frames.append(ft)
             continue
+        # Score is recorded so consumers (T2V prompt builder, HF skill) can apply
+        # their own quality floor instead of trusting rank order blindly.
         candidate_str = "；".join(
-            f"{c['filename']} — {c.get('description', '')[:60].strip()}"
+            f"{c['filename']}"
+            + (f" ({c['score']:.2f})" if c.get("score") is not None else "")
+            + f" — {c.get('description', '')[:60].strip()}"
             for c in candidates[:3]
         )
         new_line = f"- asset_candidates: {candidate_str}"
@@ -136,12 +140,10 @@ def run(
 
 
 def guard(compositions_dir: Path, project_dir: Path | None = None) -> bool:
-    """Run Rule Guard on compositions_dir. Returns True if no unknown violations."""
+    """Run Rule Guard on compositions_dir. Returns True if no violations."""
     result = guard_scan(compositions_dir)
-    if result.fixed:
-        logger.info("Rule Guard fixed %d violation(s)", len(result.fixed))
     if result.unknown:
-        logger.warning("Rule Guard: %d unknown violation(s) need manual fix:", len(result.unknown))
+        logger.warning("Rule Guard: %d violation(s) need manual fix:", len(result.unknown))
         for v in result.unknown:
             logger.warning("  [%s] %s:%d — %s", v.rule_id, v.file.name, v.line, v.detail)
     if project_dir:

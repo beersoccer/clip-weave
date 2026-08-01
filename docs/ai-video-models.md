@@ -208,3 +208,70 @@ vertex_project: noah-ai-xxx  # GCP 项目 ID,Vertex 用
 排查小坑:被复用的 shell 里如果早先 `export` 过 `VERTEX_VIDEO_LOCATION`,
 `load_dotenv()` 默认**不覆盖**已存在的环境变量,`.env` 的改动会被静默忽略。
 换新 shell 或 `env -u VERTEX_VIDEO_LOCATION …` 再跑。
+
+## T2V 提示词:复用 HF 产出物,不重新分析
+
+提示词不再由代码即时拼接,而是落成 storyboard 同级的 `T2V-PROMPTS.md`,可编辑、可下载、
+可回传。首次运行生成,之后以该文件为准:
+
+```bash
+# 只生成/刷新提示词文件,不调模型、不花钱
+uv run python -m clip_weave gen-video videos/xxx/STORYBOARD.md --provider doubao --prompts-only
+
+# 编辑 T2V-PROMPTS.md 后直接跑,以文件为准
+uv run python -m clip_weave gen-video videos/xxx/STORYBOARD.md --provider doubao
+
+# 丢弃手工编辑、从 STORYBOARD.md 重新生成
+uv run python -m clip_weave gen-video videos/xxx/STORYBOARD.md --provider doubao --regenerate-prompts
+```
+
+### 槽位顺序与来源
+
+顺序取各厂商指南的共识:**主体 · 动作 · 场景 · 镜头 · 光线/风格 · 音频 · 负面约束**,
+每段一个场景、一个主镜头运动,长度控制在 30–200 词。
+
+| 槽位 | 来自 HF 的哪个产出物 |
+|---|---|
+| subject / action | 帧的 `keyMessage`、`narrativeRole` |
+| scene | 帧的 `scene` + 该帧焦点素材的描述 |
+| camera | 帧叙事里的镜头动词 + 全局 `Motion grammar`(push-in → slow dolly-in 等) |
+| lighting_style | 全局 `Palette`(自动提取十六进制色值)+ `Motion grammar` |
+| audio | 帧的 `sfx`;`voiceover` 仅在 `--include-voiceover` 时进入 |
+| negative | 全局 `Negative list` + 固定的文字/UI/水印排除项 |
+| reference | 帧的 `focal:` / `asset_candidates`(Asset Matcher 已有结论,不重跑) |
+
+HF 的动效实现词汇(`gsap-effects`、`spring-pop-entrance`、反引号里的类名)会被剥掉。
+以图文/数据为主的帧会被标 `needs_review: true` —— 视频模型渲染文字不可靠,这类帧建议
+留在 HTML 路径。
+
+参考(内容均已改写以符合授权要求):
+[Google DeepMind Veo 提示词指南](https://deepmind.google/models/veo/prompt-guide/)、
+[Runway Academy prompting guide](https://academy.runwayml.com/guides/prompting-guide)、
+[阿里云百炼文生视频 API(negative_prompt / prompt_extend)](https://help.aliyun.com/en/model-studio/text-to-video-api-reference)。
+
+## 素材:复用 storyboard 的结论 + 质量下限
+
+每帧写入 **top-3** 候选(检索取 top-5,写前 3),格式带分数:
+
+```
+- asset_candidates: 20-1.png (0.61) — 蛟龙底盘俯视图；v6s-plus.png (0.42) — 超级电机
+```
+
+新增**匹配度下限**:低于阈值的候选直接丢弃,该帧宁可没有候选,也不给一个"最不差"的错
+素材 —— 因为 T2V 会忠实地把错素材画出来。默认 0.35(embedding 余弦)/ 0.30(BM25),
+用 `ASSET_MIN_SCORE` 覆盖,单次调用可传 `min_score`。
+
+## 走 HTML 还是 T2V:用户决定
+
+- 项目级:`BRIEF.md` frontmatter 的 `render: html | t2v | mixed`
+- 帧级:`STORYBOARD.md` 帧上的 `visual_type: motion | live_action`
+
+`run` 命令在未指定时会问一次并把答案写进 BRIEF.md(之后不再问,改那一行即可切换):
+
+```bash
+uv run python -m clip_weave run --message "..." --project x            # 交互询问
+uv run python -m clip_weave run --message "..." --project x --render t2v  # 直接指定
+```
+
+默认 html —— 确定性、可复现、无推理费用,且是唯一能把精确文字/品牌色/数据图表画对的
+路径。若 BRIEF.md 写的是 html 而又去跑 `gen-video`,会先提示确认(`--yes` 跳过)。

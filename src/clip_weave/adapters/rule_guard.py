@@ -1,8 +1,39 @@
-"""Rule Guard — Python pre-flight checks for HF-specific rules + Fix Registry.
+"""Rule Guard — pre-assembly pre-flight for the one HF rule that needs it.
 
-Runs before `npx hyperframes check` to catch known violations deterministically
-(<1s, 0 LLM tokens). Known patterns are fixed in-place; unknown errors fall through
-to HF's own check/lint cycle.
+Scope is deliberately narrow. Rule Guard used to carry four detectors; three
+were removed after checking the HyperFrames source directly. Do not reintroduce
+them — `tests/test_rule_guard.py` asserts the scope, and the design record is
+`docs/superpowers/specs/2026-07-31-rule-guard-soundness-and-t2v-routing-design.md`.
+
+Why the other three are gone:
+
+* `gsap_css_transform_conflict` — HF implements it in
+  `packages/lint/src/rules/gsap.ts` at error severity, on top of an acorn AST
+  parser that resolves computed timelines, label positions and standalone
+  `gsap.*` calls, and exempts both `from` and `fromTo`. A regex approximation is
+  strictly worse and produces false positives on correct code.
+* `gsap_timeline_set_initial_hide` — HF's rule of that name means the OPPOSITE.
+  It warns about a zero-duration `tl.set(...)` at position 0 INSIDE the paused
+  timeline (frame 0 renders un-hidden), and explicitly exempts off-timeline
+  `gsap.set()`. `packages/lint/src/rules/gsap.test.ts:2492` asserts a top-level
+  `gsap.set('#a', { opacity: 0 })` must NOT be flagged. The previous
+  implementation flagged exactly that, and advised moving it into the timeline —
+  which is what HF warns about.
+* `preserve_3d_filter` — no HF lint code exists for it, but deciding whether a
+  `filter` actually breaks a 3D context needs full CSS cascade resolution plus
+  the ancestor chain. Not decidable at the regex layer, and the constraint is
+  already inlined into each frame worker's packet.
+
+What remains earns its place: `media_in_subcomposition` is a NON-NEGOTIABLE
+constraint (`hyperframes-core/references/variables-and-media.md`) whose failure
+mode is a black/blank render, and HF's own lint rule for it is inactive in two
+windows that clip-weave operates in:
+
+1. Pre-assembly — `packages/lint/src/project.ts:141` reads `index.html` first,
+   so the whole lint cannot run before the project is assembled.
+2. Single-file entry — `project.ts:165` skips the `compositions/` walk when an
+   entry file is given and never sets `isSubComposition`, while the rule starts
+   with `if (!options.isSubComposition) return findings;` (`media.ts:349`).
 """
 
 import hashlib
@@ -14,12 +45,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-RULE_IDS = [
-    "media_in_subcomposition",
-    "gsap_css_transform_conflict",
-    "gsap_timeline_set_initial_hide",
-    "preserve_3d_filter",
-]
+RULE_IDS = ["media_in_subcomposition"]
+
+_MEDIA_TAG = re.compile(r"<(video|audio)\b")
+
+_MEDIA_DETAIL = (
+    "<video>/<audio> inside a composition file. HF requires media to be a DIRECT "
+    "child of the host root (index.html); media inside a sub-composition is never "
+    "seeked/decoded and renders BLANK/black. Move it to index.html root and drive "
+    "per-scene motion from the MAIN timeline at global time."
+)
 
 
 @dataclass
@@ -39,7 +74,6 @@ class Violation:
 @dataclass
 class GuardResult:
     violations: list[Violation] = field(default_factory=list)
-    fixed: list[Violation] = field(default_factory=list)
     unknown: list[Violation] = field(default_factory=list)
 
     @property
@@ -48,122 +82,59 @@ class GuardResult:
 
 
 def _check_media_in_subcomposition(html: str, path: Path) -> list[Violation]:
-    """<video>/<audio> must be direct children of index.html root, not in compositions/."""
+    """<video>/<audio> must be a direct child of the index.html root."""
     violations = []
     for i, line in enumerate(html.splitlines(), 1):
-        if re.search(r"<(video|audio)\b", line):
-            violations.append(Violation(
-                rule_id="media_in_subcomposition",
-                file=path,
-                line=i,
-                detail=f"<video>/<audio> in composition file — must be in index.html root",
-            ))
+        if _MEDIA_TAG.search(line):
+            violations.append(
+                Violation(
+                    rule_id="media_in_subcomposition",
+                    file=path,
+                    line=i,
+                    detail=_MEDIA_DETAIL,
+                )
+            )
     return violations
-
-
-def _check_gsap_css_transform_conflict(html: str, path: Path) -> list[Violation]:
-    """CSS transform: translateX/Y() and GSAP x/y on same element."""
-    violations = []
-    lines = html.splitlines()
-    for i, line in enumerate(lines, 1):
-        if re.search(r"transform:\s*translate[XY]\(", line):
-            violations.append(Violation(
-                rule_id="gsap_css_transform_conflict",
-                file=path,
-                line=i,
-                detail="CSS translateX/Y() found — may conflict with GSAP x/y; use xPercent/yPercent",
-            ))
-    return violations
-
-
-def _check_gsap_timeline_set_initial_hide(html: str, path: Path) -> list[Violation]:
-    """gsap.set() at page-load scope on clip elements not yet in DOM.
-
-    Only flags calls with ≤4 spaces of leading indent (top-level / first-level
-    scope). Calls inside callbacks or function bodies (indent ≥5) are skipped to
-    avoid false positives from gsap.set() used inside ScrollTrigger, onComplete, etc.
-    """
-    violations = []
-    for i, line in enumerate(html.splitlines(), 1):
-        stripped = line.lstrip()
-        if not re.search(r"\bgsap\.set\s*\(", stripped):
-            continue
-        if len(line) - len(stripped) > 4:  # inside a callback — skip
-            continue
-        violations.append(Violation(
-            rule_id="gsap_timeline_set_initial_hide",
-            file=path,
-            line=i,
-            detail="gsap.set() at page load — if targeting a later-scene clip, use tl.set() inside timeline",
-        ))
-    return violations
-
-
-def _check_preserve_3d_filter(html: str, path: Path) -> list[Violation]:
-    """transform-style:preserve-3d with filter on ancestor."""
-    violations = []
-    if "preserve-3d" in html and "filter:" in html:
-        violations.append(Violation(
-            rule_id="preserve_3d_filter",
-            file=path,
-            line=0,
-            detail="preserve-3d + filter both present — verify filter is not on an ancestor of preserve-3d element",
-        ))
-    return violations
-
-
-_FIXERS: dict = {
-    # gsap_css_transform_conflict: no auto-fix — converting x:/y: pixel values to
-    # xPercent:/yPercent: changes semantics. Manual fix: replace CSS
-    # `left: 50%; transform: translateX(-50%)` with `left: calc(50% - <half-width>px)`.
-}
 
 
 def scan(compositions_dir: Path) -> GuardResult:
-    """Scan all HTML files in compositions_dir for HF rule violations."""
+    """Scan every HTML file under compositions_dir. No auto-fix by design.
+
+    An auto-fixer would have to move the media node into `index.html`, which
+    does not exist yet in the pre-assembly window this check exists for.
+    """
     result = GuardResult()
-    # **/*.html matches at all depths including root; no need for *.html separately
-    html_files = list(compositions_dir.glob("**/*.html"))
-
-    for path in html_files:
+    # **/*.html matches at all depths including the root of compositions_dir.
+    for path in compositions_dir.glob("**/*.html"):
         html = path.read_text(encoding="utf-8", errors="replace")
-        all_violations = (
-            _check_media_in_subcomposition(html, path)
-            + _check_gsap_css_transform_conflict(html, path)
-            + _check_gsap_timeline_set_initial_hide(html, path)
-            + _check_preserve_3d_filter(html, path)
-        )
-
-        for v in all_violations:
-            fixer = _FIXERS.get(v.rule_id)
-            if fixer:
-                fixed_html = fixer(html)
-                if fixed_html and fixed_html != html:
-                    path.write_text(fixed_html, encoding="utf-8")
-                    html = fixed_html
-                    result.fixed.append(v)
-                    logger.info("Fixed %s in %s:%d", v.rule_id, path.name, v.line)
-                else:
-                    result.violations.append(v)
-                    result.unknown.append(v)
-            else:
-                result.violations.append(v)
-                result.unknown.append(v)
-                logger.warning("Rule violation (no auto-fix): %s in %s:%d — %s",
-                               v.rule_id, path.name, v.line, v.detail)
-
+        for v in _check_media_in_subcomposition(html, path):
+            result.violations.append(v)
+            result.unknown.append(v)
+            logger.warning(
+                "Rule violation: %s in %s:%d — %s", v.rule_id, path.name, v.line, v.detail
+            )
     return result
 
 
 def save_history(project_dir: Path, result: GuardResult) -> None:
-    """Persist violation fingerprints so recurring errors skip LLM repair."""
+    """Append violation fingerprints to a per-project log.
+
+    This is a log, not a control signal: nothing reads it back to make
+    decisions. With a single deterministic error-severity rule there is nothing
+    for a "recurring violation" escalation to add.
+    """
     history_path = project_dir / ".clip-weave" / "guard-history.json"
-    history_path.parent.mkdir(exist_ok=True)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict = {}
     if history_path.exists():
-        existing = json.loads(history_path.read_text())
-    for v in result.fixed:
-        existing[v.fingerprint] = {"rule_id": v.rule_id, "status": "fixed"}
+        try:
+            loaded = json.loads(history_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+            else:
+                logger.warning("guard-history.json is not an object — rebuilding it")
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("guard-history.json unreadable (%s) — rebuilding it", exc)
     for v in result.unknown:
         existing.setdefault(v.fingerprint, {"rule_id": v.rule_id, "status": "unknown"})
-    history_path.write_text(json.dumps(existing, indent=2))
+    history_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")

@@ -11,10 +11,25 @@ __pycache__/
 # Runtime output
 output/
 
-# Process docs (plans, specs, SDD ledger — development scaffolding, not project code)
-docs/superpowers/
+# SDD execution scaffolding (task briefs/reports/review diffs) — ephemeral,
+# deleted per-plan once its final whole-branch review is clean and merged.
+# docs/superpowers/ (specs + plans) is NOT ignored: those are the durable
+# design/decision record and belong in git.
 .superpowers/
 
 # macOS
 .DS_Store
 **/.DS_Store
+
+# PPT generation artifacts
+docs/ppt/
+
+# Claude Code / agent tooling
+.agents/
+.claude/
+
+# Generated videos
+videos/
+
+# VS Code workspace file (personal)
+*.code-workspace

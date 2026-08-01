@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 TOP_K = 5
 
+# Minimum similarity for a candidate to be offered at all.
+#
+# Without a floor, top-K always returns K assets — even for a frame whose subject
+# does not exist in capture/ — and the downstream consumer cannot tell "best match"
+# from "least bad match". Cosine similarity on text-embedding-3-small style models
+# sits around 0.25–0.35 for unrelated text and 0.45+ for genuinely related text,
+# so 0.35 is a conservative floor. Override with ASSET_MIN_SCORE.
+MIN_SCORE_EMBEDDING = 0.35
+# BM25 is unbounded and sparse: a zero means not a single query term matched.
+MIN_SCORE_BM25 = 0.30
+
 # File extensions treated as visual assets eligible for Vision enrichment
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 
@@ -248,6 +259,7 @@ def _embed_and_rank(
     base_url: str,
     api_key: str,
     model: str = _EMBED_MODEL_DEFAULT,
+    min_score: float = MIN_SCORE_EMBEDDING,
 ) -> list[list[dict]] | None:
     """Semantic ranking via embeddings. Returns None if gateway unavailable."""
     all_texts = queries + [a["description"] for a in assets]
@@ -262,8 +274,25 @@ def _embed_and_rank(
     for q_vec in q_vecs:
         scored = [(_cosine(q_vec, a_vec), asset) for a_vec, asset in zip(a_vecs, assets)]
         scored.sort(key=lambda x: -x[0])
-        results.append([a for _, a in scored[:top_k]])
+        results.append(_apply_floor(scored[:top_k], min_score, "embedding"))
     return results
+
+
+def _apply_floor(
+    scored: list[tuple[float, dict]], min_score: float, method: str
+) -> list[dict]:
+    """Attach scores and drop candidates below the quality floor."""
+    kept: list[dict] = []
+    for score, asset in scored:
+        enriched = {**asset, "score": round(float(score), 4), "match_method": method}
+        if score >= min_score:
+            kept.append(enriched)
+        else:
+            logger.debug(
+                "asset %s dropped: %s score %.4f < floor %.2f",
+                asset.get("filename"), method, score, min_score,
+            )
+    return kept
 
 
 # ── BM25 fallback ─────────────────────────────────────────────────────────────
@@ -284,13 +313,18 @@ def _bm25_score(query_terms: list[str], doc: str) -> float:
     return score
 
 
-def _bm25_rank(queries: list[str], assets: list[dict], top_k: int) -> list[list[dict]]:
+def _bm25_rank(
+    queries: list[str],
+    assets: list[dict],
+    top_k: int,
+    min_score: float = MIN_SCORE_BM25,
+) -> list[list[dict]]:
     results = []
     for query in queries:
         terms = re.findall(r"\w+", query.lower())
         scored = [(_bm25_score(terms, a["description"]), a) for a in assets]
         scored.sort(key=lambda x: -x[0])
-        results.append([a for _, a in scored[:top_k]])
+        results.append(_apply_floor(scored[:top_k], min_score, "bm25"))
     return results
 
 
@@ -301,6 +335,7 @@ def match_assets(
     beat_queries: list[str],
     top_k: int = TOP_K,
     cfg=None,
+    min_score: float | None = None,
 ) -> list[list[dict]]:
     """For each beat query, return top-K matching assets from capture/.
 
@@ -341,15 +376,26 @@ def match_assets(
     # Phase 2: Embedding-based semantic ranking
     has_embed = bool(cfg.embedding_base_url and cfg.embedding_api_key)
 
+    env_floor = os.getenv("ASSET_MIN_SCORE", "").strip()
+    override = min_score if min_score is not None else (float(env_floor) if env_floor else None)
+
     if has_embed:
         result = _embed_and_rank(
             beat_queries, assets, top_k,
             base_url=cfg.embedding_base_url,
             api_key=cfg.embedding_api_key,
             model=cfg.embedding_model or _EMBED_MODEL_DEFAULT,
+            min_score=override if override is not None else MIN_SCORE_EMBEDDING,
         )
         if result is not None:
-            logger.info("Asset matching: embedding semantic ranking (%d assets)", len(assets))
+            logger.info(
+                "Asset matching: embedding semantic ranking (%d assets, floor %.2f) — "
+                "%s of %d queries got at least one candidate",
+                len(assets),
+                override if override is not None else MIN_SCORE_EMBEDDING,
+                sum(1 for r in result if r),
+                len(result),
+            )
             return result
         logger.info("Embedding endpoint unavailable — falling back to BM25")
     else:
@@ -357,4 +403,7 @@ def match_assets(
 
     # Phase 3: BM25 fallback
     logger.info("Asset matching: BM25 keyword ranking (%d assets)", len(assets))
-    return _bm25_rank(beat_queries, assets, top_k)
+    return _bm25_rank(
+        beat_queries, assets, top_k,
+        min_score=override if override is not None else MIN_SCORE_BM25,
+    )

@@ -30,7 +30,13 @@ def cli():
 @click.option("--videos-dir", default="videos", help="Root directory for video projects")
 @click.option("--length", default="30s", help="Video length (e.g. 15s, 30s, 60s)")
 @click.option("--workflow", default=None, help="Force a specific HF workflow")
-def run_cmd(url, message, project, videos_dir, length, workflow):
+@click.option(
+    "--render",
+    type=click.Choice(["html", "t2v", "mixed", "ask"]),
+    default="ask",
+    help="Renderer: html (HF compositions) | t2v (video models) | mixed | ask (default)",
+)
+def run_cmd(url, message, project, videos_dir, length, workflow, render):
     """Route a video request and prepare the HF project for delegation."""
     cfg = load_config()
     project_name = project or _derive_project_name(url, message)
@@ -47,6 +53,45 @@ def run_cmd(url, message, project, videos_dir, length, workflow):
         cfg=cfg,
     )
     click.echo(f"Project ready: {project_dir}")
+    _settle_render_path(project_dir, render)
+
+
+def _settle_render_path(project_dir: Path, choice: str) -> str:
+    """Make the HTML-vs-T2V decision explicit, then remember it in BRIEF.md."""
+    from clip_weave.core import render_path as rp
+
+    if choice != "ask":
+        rp.persist(project_dir, choice)  # type: ignore[arg-type]
+        click.echo(f"Renderer: {choice} (written to BRIEF.md)")
+        return choice
+
+    existing, source = rp.resolve(project_dir)
+    if existing:
+        click.echo(f"Renderer: {existing} (from {source})")
+        return existing
+
+    click.echo(
+        "\n渲染路径未指定。\n"
+        "  html  HF 合成（默认）— 精确文字/品牌色/数据图表，可复现，无推理费用\n"
+        "  t2v   视频大模型     — 写实镜头、真实光影，按秒计费，有随机性\n"
+        "  mixed 两者混排       — 图文帧走 html，实拍帧走 t2v（帧上写 visual_type）"
+    )
+    if not sys.stdin.isatty():
+        click.echo(f"非交互环境，按默认 {rp.DEFAULT} 处理（用 --render 显式指定）")
+        rp.persist(project_dir, rp.DEFAULT)
+        return rp.DEFAULT
+
+    picked = click.prompt(
+        "选择渲染路径", type=click.Choice(list(rp.VALID)), default=rp.DEFAULT, show_default=True
+    )
+    rp.persist(project_dir, picked)
+    click.echo(f"已写入 BRIEF.md：render: {picked}（下次不再询问，改这一行即可切换）")
+    if picked in ("t2v", "mixed"):
+        click.echo(
+            f"下一步：uv run python -m clip_weave gen-video {project_dir}/STORYBOARD.md "
+            "--provider doubao --dry-run"
+        )
+    return picked
 
 
 @cli.command("guard")
@@ -173,6 +218,17 @@ def route_cmd(message, url, no_semantic, compare):
 @click.option("--max-wait", type=int, default=900, help="Give up on a task after N seconds")
 @click.option("--dry-run", is_flag=True, help="Print the prompts, call nothing")
 @click.option("--concat", is_flag=True, help="Stitch the finished clips into one mp4 (needs ffmpeg)")
+@click.option(
+    "--regenerate-prompts",
+    is_flag=True,
+    help="Rebuild T2V-PROMPTS.md from STORYBOARD.md, discarding manual edits",
+)
+@click.option(
+    "--prompts-only",
+    is_flag=True,
+    help="Write/refresh T2V-PROMPTS.md and stop (no generation, no cost)",
+)
+@click.option("--yes", is_flag=True, help="Skip the renderer confirmation prompt")
 def gen_video_cmd(
     storyboard,
     provider,
@@ -190,10 +246,72 @@ def gen_video_cmd(
     max_wait,
     dry_run,
     concat,
+    regenerate_prompts,
+    prompts_only,
+    yes,
 ):
-    """Generate one AI video clip per frame of STORYBOARD (a STORYBOARD.md)."""
+    """Generate one AI video clip per frame of STORYBOARD (a STORYBOARD.md).
+
+    Prompts live in a sibling `T2V-PROMPTS.md`: it is built from the storyboard on
+    first run, then reused (and hand-editable) on every later run.
+    """
     from clip_weave.adapters.video_gen import VideoGenError
+    from clip_weave.core import render_path as rp
+    from clip_weave.core.t2v_prompt import literal_prompt, load_or_create
     from clip_weave.core.video_pipeline import concat_clips, generate_clips
+
+    storyboard_path = Path(storyboard)
+    project_dir = storyboard_path.parent
+
+    # The renderer choice belongs to the user — surface a conflict, never override it.
+    chosen, source = rp.resolve(project_dir)
+    if chosen == "html" and not yes and not prompts_only:
+        click.echo(f"BRIEF.md 指定 render: html（{source}）— 该项目的画面本应由 HF 合成。")
+        if not dry_run and sys.stdin.isatty() and not click.confirm("仍然用 T2V 生成？", default=False):
+            click.echo("已取消。要长期切换：把 BRIEF.md 的 render: 改成 t2v 或 mixed。")
+            return
+    elif chosen is None and not yes:
+        click.echo("提示：BRIEF.md 未写 render:，本次按 t2v 执行。"
+                   "用 `run --render t2v` 或手写 `render: t2v` 可固定下来。")
+
+    doc, prompts_path, created = load_or_create(
+        storyboard_path,
+        regenerate=regenerate_prompts,
+        provider=provider,
+        resolution=resolution,
+        include_voiceover=include_voiceover,
+        include_audio=generate_audio,
+    )
+    click.echo(f"{'wrote' if created else 'using'} {prompts_path}")
+    if not created and not regenerate_prompts:
+        ignored_flags = [
+            name for name, value in (
+                ("--style", style),
+                ("--include-voiceover", include_voiceover),
+                ("--generate-audio", generate_audio),
+            )
+            if value
+        ]
+        if ignored_flags:
+            click.echo(
+                f"  注意：{', '.join(ignored_flags)} 对已存在的 {prompts_path.name} 不生效——"
+                "该文件已生成的提示词优先。用 --regenerate-prompts 从 STORYBOARD.md 重建"
+                "（会丢弃手工编辑），或直接编辑该文件。"
+            )
+    flagged = [s.index for s in doc.specs if s.needs_review]
+    if flagged:
+        click.echo(
+            f"  needs_review: frame {', '.join(map(str, flagged))} 以图文/数据为主，"
+            "视频模型渲染文字不可靠 — 建议这些帧留在 HTML 路径"
+        )
+    if prompts_only:
+        click.echo("--prompts-only：未调用任何模型。编辑该文件后再跑一次即可生效。")
+        return
+
+    prompt_overrides = {s.index: literal_prompt(s) for s in doc.specs}
+    duration_overrides = {s.index: s.duration for s in doc.specs}
+    negative_overrides = {s.index: s.negative for s in doc.specs}
+    reference_overrides = {s.index: s.reference for s in doc.specs}
 
     frame_list = None
     if frames:
@@ -209,6 +327,7 @@ def gen_video_cmd(
             provider=provider,
             out_dir=out_dir,
             frames=frame_list,
+            render_default=chosen,
             resolution=resolution,
             ratio=ratio,
             duration=duration,
@@ -221,6 +340,10 @@ def gen_video_cmd(
             max_wait=max_wait,
             dry_run=dry_run,
             report=lambda msg: click.echo(msg),
+            prompt_overrides=prompt_overrides,
+            duration_overrides=duration_overrides,
+            negative_overrides=negative_overrides,
+            reference_overrides=reference_overrides,
         )
     except VideoGenError as exc:
         click.echo(str(exc), err=True)

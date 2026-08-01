@@ -1,11 +1,13 @@
 # clip-weave 架构方案
 
-> 文档版本：v6.1 | 更新日期：2026-07-29
+> 文档版本：v7.0 | 更新日期：2026-07-31
 > HF 能力分析见 `hyperframes-analysis.md`；技术选型见 `tech-selection.md`
 >
-> **v6.1 变更**：新增 § 3.2.1 Rule Guard 实现状态与待办（源码核对）；
-> Kling Bridge → T2V Bridge（复用 STORYBOARD.md 走文生视频，跳过写 HTML）；
-> § 9 移除误导性成本表；§ 10 HeyGen 内网屏蔽已解决，待切云厂商账号。
+> **v7.0 变更**：按 HF 源码逐条核对 Rule Guard 四条规则，删除三条（两条与 HF 原生重复
+> 或语义相反，一条无法可靠判定），只保留 `media_in_subcomposition`，并记录其真实价值
+> 边界（装配前 + 单文件入口两个窗口）；取消指纹规范化与历史消费；补记增量 check 的
+> 覆盖率损失；T2V 路径实际实现状态（三家 provider、用户可编辑的 `T2V-PROMPTS.md`、
+> 项目级 `render:` 决策，取代此前设想的逐帧路由）。
 
 ---
 
@@ -34,9 +36,8 @@ clip-weave 补位（HF 缺失或用户体验不足）：
 |--------------|--------|
 | Intent Router | 用户对话/YAML → HF workflow 选择 + BRIEF.md 自动生成 |
 | Asset Matcher | asset-descriptions.md → 语义匹配 → STORYBOARD `asset_candidates` |
-| Rule Guard | 生成前后确定性规则守卫，绕开 LLM 上下文压缩导致的规则遗忘 |
-| Fix Registry | 已知错误定位 + 模板化修复，避免 lint 循环反复烧 token |
-| T2V Bridge | 复用 `STORYBOARD.md` 交文生视频模型直出写实镜头，跳过写 HTML（P3）|
+| Rule Guard | 装配前预检 `media_in_subcomposition` —— HF lint 有此规则但在装配前与单文件入口两个窗口失效 |
+| T2V 路径 | 复用 `STORYBOARD.md` 交文生视频模型直出写实镜头，跳过写 HTML；渲染路径由用户在项目之初选定 |
 
 ---
 
@@ -68,133 +69,126 @@ clip-weave 补位（HF 缺失或用户体验不足）：
        │
        ▼
 ⑤ Rule Guard 拦截（clip-weave，在 HF check 之前）
-   Python 层预检 4 条 HF 特有规则（<1s）
-   命中已知模式 → Fix Registry 确定性改
-   仅未知错误 → 反馈给 HF skill 修
+   Python 层预检 media_in_subcomposition（<1s，仅这一条规则，见 § 3.1）
        │
        ▼
 ⑥ npx hyperframes check [变更文件] → render
    → renders/output.mp4
        │
        ▼
-⑦（P3）T2V 旁路：STORYBOARD.md → 文生视频模型 → FFmpeg 合流
-   与 ④⑤⑥ 并列的第二条渲染路径，跳过写 HTML
+⑦ 渲染路径决策（BRIEF.md 的 render: html | t2v | mixed）
+   render: html → 步骤 ④⑤⑥ 就是终点
+   render: t2v / mixed → STORYBOARD.md → T2V-PROMPTS.md（用户可编辑）→ 文生视频模型 → FFmpeg 合流
 ```
 
 **关键：** 步骤 ①②③⑤ 是 clip-weave 独有价值，④⑥完全委托 HF。
 
-**两条渲染路径共用同一份 `STORYBOARD.md`：**
+**渲染路径是项目级决策，不是分镜级。** 逐帧判断走 HTML 还是 T2V 对用户过于复杂，因此在
+项目之初问一次、写进 `BRIEF.md` 的 `render:` 并持久化（`run --render ask` 默认行为）。
+只有 `render: mixed` 才需要逐帧标注（`visual_type: motion | live_action`），指出个别镜头。
 
-| | HTML 路径（④⑤⑥）| T2V 旁路（⑦，P3）|
+| | HTML 路径（④⑤⑥）| T2V 路径（⑦）|
 |---|---|---|
-| 做法 | LLM 写 HTML/CSS/GSAP → HF 逐帧渲染 | 分镜描述直接交文生视频模型 |
+| 做法 | LLM 写 HTML/CSS/GSAP → HF 逐帧渲染 | `T2V-PROMPTS.md` 提示词交文生视频模型 |
 | 画面性质 | 图形/文字/UI/图表，代码级精度 | 写实画面、实景、镜头运动 |
 | 可控性 | 每帧可复现 | 有随机性，靠改提示词迭代 |
 | 主要开销 | LLM 写 + `check` 循环的时间 | 模型推理费用与排队 |
 | 不适合 | 电影级写实、真人出镜、复杂物理 | 精确文字排版、品牌色严格一致、数据准确性 |
+| 默认 | ✅ 确定性、零推理费用 | 需显式选择 |
 
-因为共用 STORYBOARD.md，选哪条路径是**分镜级别**的决策而非项目级别 —— 这是 P4 混排的基础。
-
-> ⚠️ 混排必须在 **FFmpeg 层合流**，不要把 T2V 生成的片段当 `<video>` 塞进 HTML 合成。
-> 原因：Chrome 无法同时 seek 多个 `<video>`（解码器耗尽），视频密集合成会退化为单 worker
-> 甚至超时。详见 `hyperframes-analysis.md` § 2.6 / § 9.6。
+> ⚠️ `render: mixed` 混排必须在 **FFmpeg 层合流**，不要把 T2V 生成的片段当 `<video>`
+> 塞进 HTML 合成。原因：Chrome 无法同时 seek 多个 `<video>`（解码器耗尽），视频密集
+> 合成会退化为单 worker 甚至超时。详见 `hyperframes-analysis.md` § 2.6 / § 9.6，
+> 以及 `skills/clip-weave/references/t2v-guide.md`。
 
 ---
 
-## 3. 解决 HF 三大痛点
+## 3. 解决 HF 的实际痛点
 
-### 3.1 规则遗忘
+### 3.1 规则遗忘（已按源码核对收缩）
 
-**问题：** `media_in_subcomposition`、`gsap_css_transform_conflict`、`gsap_timeline_set_initial_hide`、`preserve-3d + filter` 这 4 条 HF 特有约束不在通用 Web 文档里。长会话上下文压缩后 LLM 易遗忘，导致已修复错误重现。
+**原判断：** 4 条 HF 特有约束不在通用 Web 文档里，长会话上下文压缩后 LLM 易遗忘，
+需要 Python 层确定性守卫反复重放。
 
-**方案：Rule Guard 反复重放**
+**核对结论：** 这个判断对其中 3 条不成立。核对 HyperFrames 源码
+（`packages/lint/src/rules/gsap.ts`、`media.ts`、`packages/lint/src/project.ts`）后的
+实际情况：
 
-Python 层确定性规则检查器，**不依赖 LLM 记忆**：
+| 规则 | HF 源码事实 | clip-weave 决定 |
+|------|-----------|----------------|
+| `media_in_subcomposition` | `media.ts` 有实现（error 级）；`project.ts` 递归遍历 `compositions/**/*.html` 逐个以 `isSubComposition: true` 送检 | **保留** —— 但价值边界不同于原判断，见下 |
+| `gsap_css_transform_conflict` | `gsap.ts` 有实现（error 级），基于 acorn AST 解析器，可解析计算式 timeline、标签位置、standalone 调用；`from` 与 `fromTo` 均豁免；冲突属性不含 `rotation` | **删除** —— Python 正则版严格劣于 HF 原生 |
+| `gsap_timeline_set_initial_hide` | HF 真实语义**相反**：警告 timeline 内 position 0 的零时长 `tl.set(...)`，并明确豁免 timeline 之外的 `gsap.set()`；HF 自己的单测断言顶层 `gsap.set` 必须不报 | **删除** —— 原实现报的正是 HF 断言不该报的写法，且建议改成 HF 真规则要警告的写法 |
+| `preserve-3d + filter` | HF 全部 lint code 中无此项 | **删除** —— 机制为真，但可靠判定需完整 CSS 级联 + 祖先链解析，正则层做不到；实测在 HF 官方 3D 镜头范例上误报 |
 
-| 规则 | 检测方式 | 备注 |
-|------|--------|------|
-| `media_in_subcomposition` | **grep**：`grep -nE '<(video\|audio)\b' compositions/*.html` | ⚠️ lint 显式盲点，必须 grep 手动检查 |
-| `gsap_css_transform_conflict` | 交叉检查：同一 selector 是否 CSS `transform: translateX/Y()` + GSAP `x/y` 冲突 | lint 可检测 |
-| `gsap_timeline_set_initial_hide` | 扫描：是否在 timeline 外（页面加载时）对后面场景的 clip 元素调用 `gsap.set()` | 这些 clip 在加载时不在 DOM 里，应改用 `tl.set(sel, vars, time)` |
-| `preserve-3d + filter` | AST：`transform-style:preserve-3d` 元素的祖先链上是否有 `filter` | check 可检测 |
+**保留那一条的真实理由**（不是"lint 盲点"）：HF 的 lint 规则本身是完整的，但在
+clip-weave 工作的两个窗口里失效：
 
-**执行时机：** 每次 HF skill 写完 composition → Rule Guard 立即扫描 → 命中规则时生成结构化错误报告 + 修复模板 → 回传 HF skill。规则清单每次都从磁盘重新加载，不受 LLM 上下文压缩影响。
+1. **装配前** —— `project.ts` 的入口逻辑第一步就读 `index.html`，尚未装配时整个 lint
+   跑不起来。这正是 `frame-worker-core.md` 描述的"假绿灯"窗口。
+2. **单文件入口** —— `project.ts` 传入显式 entry 文件时跳过 `compositions/` 遍历，且不
+   设置 `isSubComposition`，而规则首行就是 `if (!options.isSubComposition) return findings;`。
 
-### 3.2 Lint 循环耗时耗 token（当前最高优先级）
+规则本身是 `variables-and-media.md` 的 NON-NEGOTIABLE 约束（媒体必须是 `index.html` 根的
+直接子元素，否则永不被 seek/解码，渲染黑屏），grep 判定精确、误报空间接近零。
 
-**问题：** `npx check` 单次 10-30s（需启动 headless Chrome），一个 composition 平均 2-3 轮，长视频总耗时上百秒。LLM 每轮重写整个 composition，可能重新引入已修复错误，形成 lint → 改 → 再 lint 死循环。
+**指导原则（后续新增任何检查前必须先满足）：** HF 已实现且实现更优的检查不重造；机制无法
+在 HF 源码中证实的规则不实现；不确定时宁可使用 HF 原生能力。任何可能把正确代码判为违规的
+检查，净收益为负 —— 它会引导 LLM 把正确代码改错。
 
-**方案：三层拦截**
+`tests/test_rule_guard.py` 中的「HF 官方正确写法零误报」测试是这条原则的可执行守卫：
+它把 HF 文档记载的正确写法（preserve-3d 叶子 DoF filter、顶层 `gsap.set`、`fromTo`
+静态居中）固化成断言，任何试图把三条被删规则加回来的改动会立刻让它失败。
+
+### 3.2 Lint 循环耗时耗 token
+
+**问题：** `npx check` 单次 10-30s（需启动 headless Chrome），一个 composition 平均 2-3 轮，
+长视频总耗时上百秒。LLM 每轮重写整个 composition，可能重新引入已修复错误，形成
+lint → 改 → 再 lint 死循环。
+
+**方案：两层**
 
 **第 1 层：Pre-flight 本地拦截（<1s）**
-Rule Guard 在 Python 层跑，能拦截的错误绝不进入 `npx check`。
+Rule Guard 在 Python 层跑一条规则（`media_in_subcomposition`），装配前即可发现，
+避免装配后才在 lint 里暴露。
 
-**第 2 层：Fix Registry（`rule_guard.py` 的 `_FIXERS` 注册表）**
+**第 2 层：增量 check**
+只 check 本次变更的 composition（`npx hyperframes check <file>`），未变更的跳过。
 
-设计上按 `rule_id` 查表，分两条出路：修复机械且语义等价 → Python 直接改写 HTML 落盘、
-标记 `fixed`、跳过 LLM 回合；修复涉及语义判断 → 输出违规位置 + 修复模板，回落给 HF skill。
+> ⚠️ **增量 check 有覆盖率代价。** 传入显式 entry 会使 HF 把该文件当作根合成：跳过
+> `compositions/` 遍历且不设 `isSubComposition`，于是 `media_in_subcomposition` 与全部
+> 项目级检查（缺失/空 sub-composition、重复 composition id、重复音轨、缺失本地资源、
+> HEVC 提示）全部失效。**策略：单文件 check 仅用于迭代，渲染前必须跑一次全项目
+> `npx hyperframes check`。** `adapters/hyperframes.py` 在单文件模式下会打印该警示，
+> 并提供 `check_full()` 表达意图。
 
-| 错误模式 | 处理方式 | 有自动 fixer？ |
-|--------|---------|--------------|
-| GSAP `x/y:` + CSS `translateX/Y()` 共存 | 报告违规行 + 模板：`left: calc(50% - <half-width>px)` 替换 `transform: translateX(-50%)` | ❌ **刻意不做** —— pixel→percent 语义不等价，机械替换会让元素位移错误 |
-| `<video>` 出现在 compositions/*.html | 报告位置；需上提到 index.html root 直接子元素 | ❌ 未实现（见 § 3.2.1）|
-| 页面加载时 `gsap.set()` 作用于后续场景的 clip | 报告；改用 `tl.set(sel, vars, time)` 放入 timeline | ❌ 未实现 —— 需推断目标 clip 的 `data-start` |
-| `preserve-3d` 祖先带 `filter` | 报告；把 filter 下移到叶子元素 | ❌ 未实现 —— 需判断哪个叶子该承载 filter |
+**原第 2 层 Fix Registry 已移除。** 唯一保留的规则在装配前没有可写目标 —— 修法是把媒体
+节点搬到 `index.html` 根，而那个文件此时还不存在。
 
-**第 3 层：违规指纹 + 增量 check**
-- 每个违规算 `sha1(rule_id + 文件名 + 行号)[:12]` 指纹，落盘到
-  `<project>/.clip-weave/guard-history.json`，用于识别"同一错误第二次出现"
-- 只 check 本次变更的 composition（`npx hyperframes check <file>`），未变更的跳过
+**原第 3 层的违规指纹 + 历史消费已取消。** 指纹规范化的目的是识别"同一语义错误复现"，
+前提是存在多条语义模糊的规则；"复现即升级人工介入"用在一条判定确定的 error 级规则上，
+等于给确定结论加冗余闸门。`guard-history.json` 保留为日志，不作为控制信号。
 
-**预期效果：** 拦截在 Python 层的错误 0 token 消耗，LLM 只处理真正新出现的问题；
-长视频 lint 循环总时长和 token 消耗预计降 30-50%（预估口径，尚待长视频实测）。
-
-### 3.2.1 实现状态与待办（2026-07-29 核对源码）
-
-> 汇报材料（`report-tech-leads.md`）只讲设计与已跑通部分，本节是准确底账。
+### 3.2.1 实现状态（2026-07-31 核对 HF 源码后）
 
 **已实现并有测试覆盖：**
 
-| 能力 | 位置 | 说明 |
-|------|------|------|
-| 4 条规则检测器 | `rule_guard.py` 的 4 个 `_check_*` 函数 | 输出 `rule_id` + 文件 + 行号 + 说明 |
-| 误报抑制 | `_check_gsap_timeline_set_initial_hide` | 缩进 > 4 空格视为在回调内（ScrollTrigger / onComplete）→ 跳过 |
-| 违规指纹计算与持久化 | `Violation.__post_init__` + `save_history()` | 写入 `.clip-weave/guard-history.json`，追加不覆盖 |
-| 增量 check | `hyperframes.py` 的 `check(project_dir, file=None)` | 支持单文件 |
-| Fix Registry 分流骨架 | `scan()` 内 `_FIXERS.get(rule_id)` 分支 | fixer 存在则改写落盘并记 `fixed`，否则记 `unknown` |
+| 能力 | 位置 |
+|------|------|
+| `media_in_subcomposition` 检测器 | `rule_guard.py` 的 `_check_media_in_subcomposition` |
+| HF 官方正确写法零误报回归测试 | `tests/test_rule_guard.py` |
+| 违规指纹计算与持久化（仅作日志） | `Violation.__post_init__` + `save_history()` |
+| 增量 check + 覆盖率警示 | `hyperframes.py` 的 `check(file=…)` / `check_full()` |
 
-**两处尚未接入：**
+**已删除（连同其设计意图）：** 三个检测器、`_FIXERS` 注册表、`GuardResult.fixed` 字段、
+指纹规范化待办、历史消费待办。理由见 § 3.1。
 
-**① `_FIXERS` 注册表为空 → 无任何自动修复**
-
-```python
-_FIXERS: dict = {}   # rule_guard.py:111，当前无条目
-```
-
-后果：`_FIXERS.get(rule_id)` 恒为 `None`，4 条规则的违规全部走 `else` 分支进入
-`result.unknown`，`result.fixed` 在实际运行中始终为空。
-**第 2 层当前的实际价值是精确定位（文件 + 行号 + 修复模板），不是自动修。**
-
-**② 指纹只写不读 → "复现即换策略"未生效**
-
-`save_history()` 内部虽然读取旧文件，但那只是为了追加合并后写回；
-代码库中没有任何位置消费 `guard-history.json` 做决策。
-因此"同签名再次出现 → 强制走 Fix Registry 兜底，不再交给 LLM"这条控制逻辑不存在，
-指纹目前是一份日志而非控制信号。
-
-**附带问题：指纹对行号敏感。** 当前指纹含行号，而 LLM 重写整个 composition 后行号极易漂移，
-同一语义错误换行号即变成新指纹，识别不出复现。这是实现强制分流前必须先解决的前置问题。
-
-**待办清单（按性价比排序）：**
-
-| # | 待办 | 工作量 | 判断 |
-|---|------|--------|------|
-| 1 | 指纹改为行号无关（`rule_id` + 违规代码片段规范化哈希） | 小 | **优先做** —— 强制分流的前置条件，当前指纹形同失效 |
-| 2 | 消费 `guard-history.json`：同指纹复现 → 不再交 LLM，直接报告并升级为人工介入 | 小 | **优先做** —— 直接解 `check → 改 → 再 check` 死循环 |
-| 3 | `media_in_subcomposition` 自动 fixer：把 `<video>`/`<audio>` 节点搬到 `index.html` root 直接子元素 | 中 —— 需保持 `id`、样式引用、GSAP 选择器不断 | 值得做 —— 这条是 lint 显式盲点，且修法最接近机械 |
-| 4 | `gsap.set()` → `tl.set()` 自动 fixer | 中 —— 需解析目标 clip 的 `data-start` 作为插入时间 | 可做，风险中等 |
-| 5 | `preserve-3d + filter` 自动 fixer | 大 —— 需判断 filter 该落到哪个叶子元素 | 暂不做，保持报告 |
-| 6 | GSAP transform 冲突自动 fixer | 大且有风险 | **明确不做** —— 语义不等价，见上表 |
+**反面案例值得留档：** `gsap_timeline_set_initial_hide` 的语义倒置源于把
+`determinism-rules.md` 的一条窄约束（"不要对后续场景的 clip 调用 `gsap.set()`"）与一个
+同名 lint code 混为一谈，然后两者都没实现对。后者的真实语义是相反方向。更进一步，
+那条窄约束自身的机制也不成立：HyperFrames 运行时（`packages/core/src/runtime/init.ts`）
+显示 clip 从不从 DOM 移除（容器 `visibility: hidden`，叶子 timed clip `display: none`，
+靠 `querySelectorAll("[data-start]")` 枚举）。**文档与运行时冲突时以运行时为准。**
 
 ### 3.3 素材利用率低
 
@@ -271,9 +265,9 @@ HF 的两种模式产出物**完全相同**（BRIEF.md、STORYBOARD.md、composi
 
 见 § 3.3。位于 `src/clip_weave/adapters/asset_matcher.py`。
 
-### 4.3 Rule Guard + Fix Registry
+### 4.3 Rule Guard
 
-见 § 3.1 § 3.2。位于 `src/clip_weave/adapters/rule_guard.py`。
+见 § 3.1 § 3.2。位于 `src/clip_weave/adapters/rule_guard.py`。单条规则，无 Fix Registry。
 
 ---
 
@@ -356,21 +350,32 @@ clip-weave/
 ├── src/clip_weave/
 │   ├── pipeline.py                     # 顶层编排：Intent → Factory → Delegate → Guard
 │   ├── adapters/
-│   │   ├── hyperframes.py              # HF CLI 封装（init/capture/check/render）
-│   │   ├── rule_guard.py               # 规则守卫 + Fix Registry
+│   │   ├── hyperframes.py              # HF CLI 封装（init/capture/lint/check/check_full/render）
+│   │   ├── rule_guard.py               # 单规则装配前预检（media_in_subcomposition）
 │   │   ├── asset_matcher.py            # 素材语义匹配
-│   │   └── t2v.py                      # 文生视频旁路：STORYBOARD.md → 视频片段（P3，待建）
+│   │   └── video_gen/                  # 文生视频 provider
+│   │       ├── base.py                 # ProviderConfig / VideoModel / submit→poll→download
+│   │       ├── doubao.py               # 豆包 Seedance（Volcengine Ark 协议）
+│   │       ├── ali.py                  # 通义万相（DashScope 异步协议）
+│   │       ├── vertex.py               # Google Veo（predictLongRunning）
+│   │       └── gcp_project.py          # Vertex 所需 GCP project id 解析
 │   └── core/
 │       ├── intent_router.py            # 用户输入 → workflow + BRIEF.md
+│       ├── workflow_router.py          # LLM 语义 workflow 分类（关键词为兜底）
 │       ├── project_factory.py          # BRIEF.md + capture/ + frame.md 组装
-│       └── delegator.py                # 调 Claude Code + skill
+│       ├── delegator.py                # 调 Claude Code + skill
+│       ├── storyboard.py               # STORYBOARD.md 解析 + 基础提示词回落
+│       ├── render_path.py              # 项目级 render: html|t2v|mixed（默认 HTML）
+│       ├── t2v_prompt.py               # 生成用户可编辑的 T2V-PROMPTS.md
+│       └── video_pipeline.py           # 逐帧生成 + manifest + FFmpeg 合流
 ├── skills/
 │   └── clip-weave/
 │       ├── SKILL.md                    # 入口 skill（clip-weave 使用说明 + 意图引导）
 │       └── references/
 │           ├── brief-template.md       # BRIEF.md 可离线填写模板（含注释）
 │           ├── setup.md                # Provider 配置指南（API Key / config.yaml）
-│           └── input-guide.md          # 4 种素材输入方式详解
+│           ├── input-guide.md          # 4 种素材输入方式详解
+│           └── t2v-guide.md            # T2V 渲染路径：provider 选型、时长约束、GCP project 配置
 ├── videos/                             # 每个项目工作目录（HF 标准结构）
 │   └── <project-name>/
 │       ├── BRIEF.md                    # HF 标准
@@ -425,15 +430,18 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 | 阶段 | 目标 | 核心交付 | 状态 |
 |------|------|---------|------|
 | **P0** | 打通链路：意图 → HF autonomous 执行 | Intent Router；BRIEF.md 生成器；Project Factory（`init` + `capture` 封装）；Delegator；`skills/clip-weave/` 入口 skill | ✅ 完成 |
-| **P1** | 解决 lint 痛点 | 4 条 HF 高频规则检测器；Fix Registry 分流骨架；违规指纹持久化；增量 check | ✅ 完成（2 项未接入，见 § 3.2.1）|
-| **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + Embedding/BM25 top-K 检索）；capture 噪声过滤 | ✅ 完成 |
-| **P3** | **T2V 旁路** | 复用 `STORYBOARD.md` 交文生视频模型直出，跳过写 HTML；FFmpeg 合流；`visual_type` 路由 | 🔲 待验证 |
-| **P4** | 两条路径混排 | 同一支视频内动效镜头（HTML 路径）与写实镜头（T2V 路径）并存，FFmpeg 层合流 | 🔲 P3 验证后 |
+| **P1** | 解决 lint 痛点 | 按 HF 源码核对后收缩为单规则装配前预检；增量 check 及其覆盖率策略 | ✅ 完成（三条规则经核对删除，见 § 3.1）|
+| **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + Embedding/BM25 top-K 检索 + 质量下限过滤）；capture 噪声过滤 | ✅ 完成 |
+| **P3** | **T2V 路径** | STORYBOARD.md 解析；三家 provider；逐帧生成 + manifest；FFmpeg 合流；项目级 `render:` 路径选择；用户可编辑的 `T2V-PROMPTS.md` | ✅ 代码完成，待真实网关实测 |
+| **P4** | 两条路径混排 | `render: mixed` 项目内动效镜头（HTML 路径）与写实镜头（T2V 路径）并存，FFmpeg 层合流 | 🔲 P3 实测后 |
 
-**当前状态**：P0–P2 全部交付，33 个测试通过。P3 是下一个里程碑。
+**当前状态**：P0–P3 代码全部交付，257 个测试通过。P3 待真实网关实测；P4 混排待 P3
+实测后设计。
 
-> **P1 的两处未接入**（`_FIXERS` 空、指纹只写不读）不影响 P0–P2 的可用性 ——
-> 第 1 层 Pre-flight 拦截和增量 check 都已生效。详见 § 3.2.1 待办清单。
+**渲染路径是项目级决策。** 逐帧判断走 HTML 还是 T2V 对用户过于复杂，因此改为在项目之初
+问一次、写进 `BRIEF.md` 的 `render:` 并持久化。`mixed` 时才用帧上的
+`visual_type: motion | live_action` 指出个别镜头。默认 HTML —— 确定性、零推理费用，
+且是唯一能准确渲染字体、品牌色与数据的路径。
 
 ---
 
@@ -445,12 +453,11 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 | 路径 | 主要开销 | 说明 |
 |------|---------|------|
 | HTML 路径 | **时间** —— LLM 写 composition + `check` 循环 | 模型调用费极低（30s 视频量级 ~$0.05）；瓶颈是每次 `check` 10-30s × 每合成 2-3 轮 |
-| T2V 旁路（P3）| **推理费用 + 排队** | 按秒计费，且长视频需排队；时间不可控性来自服务端 |
+| T2V 路径 | **推理费用 + 排队** | 按秒计费，且长视频需排队；时间不可控性来自服务端 |
 
-**Rule Guard 预计带来的节省**：拦截在 Python 层的错误零 token 处理，
-长视频（10+ compositions）lint 环节耗时与 token 消耗预计降 30-50%。
-该数字为预估口径，尚待长视频实测；且当前 `_FIXERS` 为空（§ 3.2.1），
-节省主要来自第 1 层 Pre-flight 拦截与增量 check，而非自动修复。
+**Rule Guard 的收益已按核对结果下调。** 它现在只拦截一条规则，节省来自"装配前发现
+黑屏级缺陷"而非"减少 lint 轮数"。原先设想的 30-50% 降幅建立在四条规则与自动修复之上，
+那两个前提都已不成立，故移除该数字。
 
 ---
 
