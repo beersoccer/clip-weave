@@ -199,13 +199,16 @@ window.__timelines["<composition-id>"] = gsap.timeline({ paused: true });
 在 `t = start + duration` 这一帧仍会渲染，所以落在 `data-duration` 上的入场动画
 在最后一帧是可见的，不需要提前结束。
 
-**最容易触发 silent bug 的四条规则（自动化检查可能漏掉）：**
+**最容易触发 silent bug 的几条规则（自动化检查可能漏掉，或只在特定入口下才检查）：**
 1. Root 必须有明确 px 尺寸，否则内容塌陷到左上角
 2. 全屏背景必须放在 `position:absolute; inset:0` 的子 clip 里，**不能**设在 `#root` 上
    （渲染器会丢掉 root 的 background，Preview 正常但渲染出来是黑色）
 3. 整个 assembled page 内 `id` 不能重复（跨文件的 `<video id="xxx">` 重复会渲染成空白）
 4. **clip 必须是 composition root 的直接子元素** —— 套在 wrapper `<div>` 里的 clip
-   不会被注册。最明显的症状是 wrapper 里的 `<video>` 从不被 seek/解码，渲染全黑
+   不会被注册。最明显的症状是 wrapper 里的 `<video>` 从不被 seek/解码，渲染全黑。
+   HF lint 对此有完整的 `media_in_subcomposition` 检测（error 级），但只在
+   `isSubComposition` 被设置时才跑——装配前、以及传单文件入口时都不会设置，这两个窗口
+   是 clip-weave 的 Rule Guard 补的空档，不是 lint 完全查不出来（见 §7）
 
 ### 2.4 视频当翻页画册：不让 Chrome 解码
 
@@ -287,8 +290,10 @@ function quantizeTimeToFrame(time, fps) {
 > 官方给的修法就是对视频密集渲染退回单 worker。
 > 另有 `Another frame is pending` 错误：并行渲染打满 CPU 时出现，
 > 引擎指数退避重试 5 次后报错。
-> **clip-weave 影响**：写实镜头混合路径（P3）产出的合成属于视频密集类型，
-> 渲染耗时无法靠并行降低，排期需按单 worker 估算。
+> **clip-weave 影响**：T2V 路径（`render: t2v` / `mixed`）跳过写 HTML，走独立的
+> 文生视频 provider + FFmpeg 合流，不经过这条渲染管线；只有 `render: mixed` 项目里
+> 仍走 HTML 路径的那部分帧才受此约束，且混排本身规定必须在 FFmpeg 层合流，不把
+> T2V 片段塞进 HTML 当 `<video>`。
 
 ---
 
@@ -331,16 +336,27 @@ npx hyperframes upgrade --project . --check                     # 检查 CLI pin
 |--|--------|---------|
 | 速度 | 快（纯静态分析）| 慢（10-30s，需启动 headless Chrome）|
 | 检查内容 | HTML 结构、data-* 属性、track 重叠、GSAP/CSS 冲突、未注册 timeline | lint 的全部 + JS 运行时错误 + 布局溢出/遮挡 + motion.json 断言 + WCAG 对比度 |
-| 盲点 | **media_in_subcomposition**（显式盲点，文档标注）| 3s+ 静态合成会报 `sweep_static` 错误 |
-| 增量支持 | ✓ `lint ./path` | ✓ **`check <file>`**（只检查变更文件，未变更跳过）|
+| 盲点 | **media_in_subcomposition** 需要 `isSubComposition` 才生效（见下）| 3s+ 静态合成会报 `sweep_static` 错误 |
+| 增量支持 | ✓ `lint ./path` | ✓ **`check <file>`**（只检查变更文件，未变更跳过；代价见下）|
 | JSON 输出 | ✓ `--json` | ✓ `--json` → `{ok, lint, runtime, layout, motion, contrast}` |
 
-**lint 的已知盲点（官方文档明确标注，需要手动 grep）：**
+**`media_in_subcomposition` 不是官方文档标注的盲点，是两个入口条件下的失效窗口**
+（核对 `packages/lint/src/rules/media.ts` 与 `packages/lint/src/project.ts` 源码后纠正
+早期版本本文档的表述）：规则本身在 `isSubComposition: true` 时完整生效（error 级）。
+两个窗口会让它不生效——装配前（`index.html` 还不存在，整个 lint 跑不起来）、以及传单
+文件入口给 `check`/`lint`（HF 把该文件当根合成，跳过 `compositions/` 遍历，不设置
+`isSubComposition`）。clip-weave 的 Rule Guard 正是补这两个窗口，装配前用纯正则预检
+兜底：
+
 ```bash
-# media_in_subcomposition 规则 lint 检测不到，必须手动检查
 grep -nE '<(video|audio)\b' compositions/*.html
 # 期望：无匹配（media 应在 index.html 的 root 直接子元素）
 ```
+
+**增量 `check <file>` 的覆盖率代价**：同样因为"传单文件即被当作根合成"，除了
+`media_in_subcomposition` 之外，全部项目级检查（重复 composition id、重复音轨、
+缺失本地资源等）也会一并失效。策略是单文件 check 只用于迭代，渲染前必须跑一次
+全项目 `npx hyperframes check`。
 
 ---
 
@@ -527,17 +543,22 @@ npx skills add heygen-com/hyperframes --full-depth      # 手动安装（必须�
 
 ---
 
-## 7. HF 特有规则（**含纠错**）
+## 7. HF 特有规则（**含二次纠错，2026-07-31**）
 
 > 这些规则不在通用 Web 文档里，LLM 长会话后容易遗忘。
 > ⚠️ 标注处为旧版文档的错误描述，以下为基于源码的正确版本。
+>
+> **第二轮纠错**：`media_in_subcomposition` 并非 lint 盲点，是两个入口条件下的失效窗口
+> （§2.3/§3.1 已更新）。`gsap_timeline_set_initial_hide` 的机制陈述本身也不成立——见
+> §7.2 之后追加的说明。这两条连同 `gsap_css_transform_conflict`、`preserve-3d + filter`
+> 已从 clip-weave 的 Rule Guard 中删除或保留，完整核对记录见 `docs/architecture.md` § 3.1。
 
 | 规则 ID | 正确描述 | lint 能检测？ | 错误描述（旧版）|
 |---------|---------|------------|---------------|
-| `media_in_subcomposition` | `<video>`/`<audio>` 必须是 `index.html` 根节点的**直接子元素**（不能在 sub-composition 的 `<template>` 或任何包装 div 里）| ❌ **lint 盲点**，需手动 grep | — |
-| `gsap_css_transform_conflict` | 同一元素的 CSS `transform: translateX/Y()` 和 GSAP `x/y` 属性不能共存，改用 `xPercent`/`yPercent` | ✓ lint 能检测 | — |
-| `gsap_timeline_set_initial_hide` | ⚠️ **旧描述有误**。正确规则：**禁止**在页面加载时 `gsap.set()` 后面场景的 clip 元素（这些 clip 在页面加载时根本不在 DOM 里）。**应使用** `tl.set(selector, vars, time)` 放在 timeline 内、clip 的 `data-start` 时间点之后 | 部分检测 | 旧文档错误地说"初始隐藏用 gsap.set() 在 timeline 外"——这正好是错误做法 |
-| `preserve-3d + filter` | `transform-style: preserve-3d` 元素的**祖先链**上不能有 `filter`，filter 只能加在叶子元素上 | ✓ check 能检测 | — |
+| `media_in_subcomposition` | `<video>`/`<audio>` 必须是 `index.html` 根节点的**直接子元素**（不能在 sub-composition 的 `<template>` 或任何包装 div 里）| ✓ error 级完整实现，**但只在 `isSubComposition: true` 时才跑**——装配前和单文件入口两个窗口下不生效（不是"lint 查不出来"）| 早期本文档误标为"lint 盲点" |
+| `gsap_css_transform_conflict` | 同一元素的 CSS `transform: translateX/Y()` 和 GSAP `x/y` 属性不能共存，改用 `xPercent`/`yPercent` | ✓ lint 能检测，基于 acorn AST 解析器，比这里的简化描述更完整（豁免 `from`/`fromTo`，能解析计算式 timeline）| — |
+| `gsap_timeline_set_initial_hide` | ⚠️ **旧描述有误**。正确规则：**禁止**在页面加载时 `gsap.set()` 后面场景的 clip 元素（这些 clip 在页面加载时根本不在 DOM 里）。**应使用** `tl.set(selector, vars, time)` 放在 timeline 内、clip 的 `data-start` 时间点之后 | 部分检测 | 旧文档错误地说"初始隐藏用 gsap.set() 在 timeline 外"——这正好是错误做法。**第二轮纠错**：这条规则陈述的机制本身也不成立——HF 运行时（`packages/core/src/runtime/init.ts`）显示 clip 从不从 DOM 移除，容器用 `visibility: hidden`、叶子 timed clip 用 `display: none`，靠 `querySelectorAll("[data-start]")` 枚举，说明它们始终在 DOM 中。HF lint 真正名为 `gsap_timeline_set_initial_hide` 的规则警告的是另一件事：timeline 内 position 0 的零时长 `tl.set()`，并**豁免** timeline 外的 `gsap.set()`。见下方追加说明 |
+| `preserve-3d + filter` | `transform-style: preserve-3d` 元素的**祖先链**上不能有 `filter`，filter 只能加在叶子元素上 | ❌ HF lint 中实际无此规则；机制为真但可靠判定需完整 CSS 级联与祖先链解析 | 早期本文档标注"check 能检测"，未在源码中找到对应实现 |
 | `full_bleed_background_on_root` | 全屏背景必须放在 `position:absolute; inset:0` 的子 clip 里，**不能**直接设在 composition root 的 `background` 上（渲染器会丢掉 root background）| ❌ silent bug，预览正常但渲染黑屏 | — |
 | `root_must_be_sized` | Root `data-composition-id` 元素必须有明确 px 尺寸，所有祖先到 `height:100%` 元素都要有 resolved height | ❌ 自动门控可能漏掉 | — |
 | `gsap_repeat_ceil_overshoot` | 有限循环的 repeat 计算用 `Math.floor` 不能用 `Math.ceil`（ceil 会超出 data-duration，触发 lint 错误） | ✓ lint 检测 | — |
@@ -548,8 +569,10 @@ npx skills add heygen-com/hyperframes --full-depth      # 手动安装（必须�
 
 ### 7.1 media_in_subcomposition 的正确检测方式
 
+规则本身 lint 能检测（error 级），但依赖 `isSubComposition: true`；装配前、以及传单文件
+入口给 `check`/`lint` 时都不会设置。clip-weave 的 Rule Guard 在装配前用这个 grep 兜底：
+
 ```bash
-# lint 无法检测，必须手动 grep
 grep -nE '<(video|audio)\b' compositions/*.html
 # 期望：无匹配
 # 非空结果 = render-blocking defect，media 必须移到 index.html 的 root 直接子元素
@@ -567,6 +590,33 @@ gsap.set("#scene2-element", { opacity: 0 });
 // ✓ 正确：在 timeline 内、clip 的 data-start 时间点之后设置
 tl.set("#scene2-element", { opacity: 0 }, 2.0); // 该 clip 的 data-start 时间
 ```
+
+### 7.3 第二轮纠错：上面这条规则的前提机制不成立，HF 同名 lint 规则查的是另一件事
+
+§7.2 的写法建议本身没有问题（在 timeline 内、`data-start` 之后 set，总是安全的），但它
+陈述的**原因**——"那个 clip 可能不在 DOM"——核对 HF 运行时源码后不成立：
+`packages/core/src/runtime/init.ts` 显示 clip 从不从 DOM 移除，容器用
+`visibility: hidden`、叶子 timed clip 用 `display: none`，通过
+`document.querySelectorAll("[data-start]")` 枚举并缓存叶子判定——说明它们始终在 DOM 中。
+
+而 HF lint 里真正名为 `gsap_timeline_set_initial_hide` 的规则（`packages/lint/src/rules/gsap.ts`）
+警告的是完全不同的一件事：**timeline 内部 position 0 的零时长 `tl.set(...)`**——playhead
+恰好停在 0 时这个 set 不生效，第 0 帧显示未隐藏状态。它明确**豁免** timeline 外的
+`gsap.set()`（HF 自己的单测断言顶层 `gsap.set('#a', { opacity: 0 })` 必须不报）。
+
+```javascript
+// HF 真实规则警告的写法（timeline 内、position 0、零时长）：
+const tl = gsap.timeline({ paused: true });
+tl.set("#a", { opacity: 0 }, 0);   // ⚠️ 第 0 帧不生效，第 1 帧才跳成隐藏
+
+// HF 明确豁免、且是官方 fixHint 推荐的写法：
+gsap.set("#a", { opacity: 0 });    // ✓ timeline 外，立即生效
+const tl = gsap.timeline({ paused: true });
+```
+
+**clip-weave 的处置**：这条规则对应的检测器已从 Rule Guard 删除——旧实现报的正是 HF
+断言必须不报的写法，且建议改成 HF 真规则会警告的写法，属于净负收益。完整记录见
+`docs/architecture.md` § 3.1。
 
 ---
 

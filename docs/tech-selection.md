@@ -67,23 +67,25 @@
 
 基于 xiaomi-su7 项目的实践总结（`docs/xiaomi-su7-video-production.md` §三）：
 
-| 问题 | 根因 | 对策（v6.0 实现）|
+| 问题 | 根因 | 对策（v7.0 实现，按 HF 源码核对后收缩）|
 |------|------|------|
-| 30min/composition + 多轮 lint | 框架规则密集，LLM 每次需重读 | **Rule Guard** Python 预检（<1s）拦截已知错误，Fix Registry 确定性修复，0 LLM token |
-| 素材利用率低（134 张用 2 张）| 无结构化素材输入，LLM 随机选 | **Asset Matcher** Gemini embedding 向量匹配，为每个 beat 填充 top-5 候选 |
-| 已修复错误重现 | 长会话上下文压缩，规则细节丢失 | Rule Guard 每次从磁盘重新加载规则，不依赖 LLM 记忆；修复历史持久化到 `.clip-weave/guard-history.json` |
+| 30min/composition + 多轮 lint | 框架规则密集，LLM 每次需重读 | **Rule Guard** Python 装配前预检（<1s）拦截 `media_in_subcomposition`（HF lint 装配前跑不了的那条）；其余原设想的规则已核对删除，见下 |
+| 素材利用率低（134 张用 2 张）| 无结构化素材输入，LLM 随机选 | **Asset Matcher** Vision 增强 + Embedding/BM25 匹配，为每个 beat 填充打分的 top-K 候选 |
 | 媒体文件无法在子合成中使用 | `media_in_subcomposition` 规则 | Rule Guard 自动检测并报告；视频/音频只放 index.html |
 
-### 3.3 关键框架规则（影响生成质量）
+### 3.3 关于「4 条框架规则」的历史结论已核对纠正
 
-这些规则是 HF 特有的，不在通用 Web 文档中，必须预注入生成 prompt：
+早期版本的本文档在此列出 4 条被认为「HF 特有、需要预注入 prompt」的规则。核对
+`/Users/beersoccer/workspace/hyperframes` 源码后，结论改变：
 
-```
-media_in_subcomposition   → 视频/音频只能是 index.html 根节点的直接子元素
-gsap_css_transform_conflict → CSS transform 与 GSAP x/y 动画不能共存，改用 xPercent/yPercent
-gsap_timeline_set_initial_hide → gsap.set() 必须在 timeline 外调用，不能在 tl.set() t=0 处
-preserve-3d + filter       → 有 transform-style:preserve-3d 的元素祖先不能加 filter
-```
+| 规则 | 结论 |
+|------|------|
+| `media_in_subcomposition` | 真实存在，HF lint 已有 error 级实现，但装配前与单文件入口两个窗口失效 —— clip-weave 的 Rule Guard 因此保留这一条 |
+| `gsap_css_transform_conflict` | HF lint 用 acorn AST 解析器实现，比本文档设想的"改用 xPercent/yPercent"简单描述更完整（还处理标签位置、`from`/`fromTo` 豁免等），交给 HF 原生，不重造 |
+| `gsap_timeline_set_initial_hide` | **本文档原表述是错的，方向恰好相反。** HF 真实规则警告的是 timeline **内部** position 0 的零时长 `tl.set()`，并明确豁免 timeline **外** 的 `gsap.set()`。旧表述「必须在 timeline 外调用」与 HF 实际告警的写法正好一致，等于把 HF 要警告的模式当成了正确做法 |
+| `preserve-3d + filter` | HF lint 中无此规则；判定需要完整 CSS 级联与祖先链解析，Python 正则层做不到可靠判定，交给 HF 3D 镜头文档里内联的约束 |
+
+完整核对记录与源码引用见 `docs/architecture.md` § 3.1。
 
 ---
 
