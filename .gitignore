@@ -20,3 +20,16 @@ output/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# PPT generation artifacts
+docs/ppt/
+
+# Claude Code / agent tooling
+.agents/
+.claude/
+
+# Generated videos
+videos/
+
+# VS Code workspace file (personal)
+*.code-workspace
