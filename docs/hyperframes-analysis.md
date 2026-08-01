@@ -1,6 +1,8 @@
 # HyperFrames 深度分析
 
-> 2026-07-24 | 基于 ~/workspace/hyperframes/ 源码（packages/ + skills/）全量阅读
+> 2026-07-24 初版 | 2026-07-29 更新 §2（渲染引擎原理）
+> 基于 ~/workspace/hyperframes/ 源码（packages/ + skills/）全量阅读
+> §2 已对照官方文档与研究文章交叉验证，来源见文末 §10
 
 ---
 
@@ -16,61 +18,277 @@ HyperFrames 换了一种思路：用 HTML + CSS + GSAP 写动画，AI 最擅长�
 
 ## 2. 渲染引擎原理
 
-### 2.1 可寻址帧协议
+> **核心矛盾**：浏览器为了流畅是故意异步的 —— 图片后台解码、视频卡了丢帧、动画跟显示器时钟走。
+> 这些全是性能优化，同时全是不确定性来源。视频渲染要的恰恰相反：同样输入必须出同样的像素。
+> 下面五层，每层拆掉一个不确定性来源。
 
-渲染引擎（`packages/engine/`）的核心是"可寻址 Web 页面到视频"模型：
+### 2.1 唯一的核心抽象：Seek，不是 Play
 
-```
-Chrome CDP (headless-experimental BeginFrame API)
-    │  接管时钟，想渲染哪帧就渲染哪帧
-    ▼
-window.__hf.seek(timeSeconds)         # 框架向页面注入时间
-    │
-    ▼
-window.__timelines["<id>"].seek(t)    # GSAP timeline 被 seek 到任意时间点
-    │
-    ▼
-FrameCapture → FFmpeg                 # 截图序列 → MP4
-```
-
-关键约束：**每帧必须从时间值独立复现（Deterministic）**。
-- 禁止 `Date.now()`、`performance.now()`、`Math.random()`（非 seed）
-- 禁止 `repeat: -1`（无限循环）—— 渲染器无法推算帧数
-- 禁止 `setTimeout`、`requestAnimationFrame`、`Promise` 内建 timeline
-- 禁止在页面加载时 `gsap.set()` 后面场景的 clip 元素（那些 clip 在页面加载时不在 DOM 里）
-
-### 2.2 GSAP Timeline 注册协议
+每个合成只对外暴露一个契约：
 
 ```javascript
-// 每个合成必须有且仅有一个 paused timeline，synchronously 注册
-window.__timelines["<composition-id>"] = gsap.timeline({ paused: true });
-// key 必须等于 root 元素的 data-composition-id
-// data-duration 设置渲染总时长，timeline 长度不控制渲染
+window.__hf = {
+  duration: 10,
+  seek: (timeSeconds) => { /* 定位每个 clip、tween 和 video */ }
+}
 ```
 
-非 GSAP 运行时（CSS animations、WAAPI、Lottie、Three.js）也支持，
-但 Three.js 无法自动推断时长 —— **必须**手动设置 `data-duration`。
+渲染器**从不调 `play()`**。渲染 10s / 30fps 的视频就是 `seek(0)` 截图 → `seek(1/30)` 截图 → …
+重复 300 次。时间不会自己前进，没有任何东西由 `requestAnimationFrame` 驱动，
+浏览器的工作变成"把画面冻在这一帧，等我要下一帧"。
 
-### 2.3 合成模型
+**这一个抽象的价值：预览和渲染是同一条代码路径。**
+
+| 场景 | 驱动方式 | 调用的东西 |
+|------|---------|-----------|
+| Studio 预览 | iframe + postMessage 桥（play/pause/scrub）| `window.__hf.seek(t)` |
+| 无头渲染 | Puppeteer + CDP | `window.__hf.seek(t)` |
+
+用户拖时间轴和渲染器抓第 147 帧，走的是同一段代码，所以输出一致。
+
+**动画库通过三方法 FrameAdapter 接入：**
+
+```typescript
+interface FrameAdapter {
+  id: string;
+  init?: (ctx) => Promise<void> | void;
+  getDurationFrames: () => number;
+  seekFrame: (frame: number) => Promise<void> | void;
+}
+```
+
+GSAP 是默认，因为它的 timeline 天生 paused + seekable（`timeline.pause()` +
+`timeline.totalTime(t, false)` 就是所需的全部功能）。Lottie、经 WAAPI 的 CSS、Three.js clock
+都能套进同一形状。
+
+**套不进来的是"坚持自己掌握时钟"的东西**：无控制器的 CSS keyframes 动画、
+`<video>` 元素、自己跑 rAF 的多数 canvas 库。这些要么包一层 adapter 把时钟夺走，
+要么离线渲成帧序列再当图片回放（这正是视频的处理方式，见 §2.4）。
+
+### 2.2 帧捕获：用 BeginFrame 接管合成器
+
+capture loop 的第一个版本只有两行 Puppeteer（`seek` + `page.screenshot`），
+官方文章记录了随后踩的四个坑：
+
+**坑 1 · `Page.captureScreenshot` 与渲染器竞态**
+它在合成器"愿意给图"的时刻返回，那个时刻**不等于**"布局完成 + 字体加载完 +
+GSAP 提交了最终样式 + GPU 画完了"。于是会拿到文字还没渲染、SVG 填充还是未动画的默认值、
+`<video>` 还是 300x150 默认尺寸的帧 —— 重跑一次就对，这类 bug 最难查。
+早期靠启发式（轮询 `fonts.ready`、等 computed style、比像素哈希）兜，能用但不够稳。
+
+**坑 2 · `HeadlessExperimental.beginFrame` 才给得了控制权**
+一次 CDP 调用原子地跑完 layout→paint→composite→截图：
+
+```javascript
+await cdp.send("HeadlessExperimental.beginFrame", {
+  frameTimeTicks, interval,
+  screenshot: { format: "jpeg", quality: 80, optimizeForSpeed: true }
+});
+```
+
+一次调用一帧，合成器在你要下一帧之前保持暂停。返回值带 `hasDamage`，
+告诉你画面相比上一帧有没有变化。**没有并发管线在后台收尾，就没有竞态。**
+
+代价是环境要求很硬：二进制必须是 `chrome-headless-shell`（不是普通 Chrome），
+外加 9 个关掉异步调度的 flag：
+
+```
+--deterministic-mode                        # 时间源固定，performance.now() 由 frameTimeTicks 驱动
+--enable-begin-frame-control                # 合成器等 CDP 指令才推进
+--run-all-compositor-stages-before-draw
+--disable-threaded-animation                # 关线程化动画
+--disable-threaded-scrolling
+--disable-checker-imaging                   # 关增量图片解码
+--disable-image-animation-resync
+--enable-surface-synchronization            # 关 vsync 驱动的 surface 时序
+```
+
+> ⚠️ **平台限制（对 clip-weave 直接相关）**：这套组合只在 **Linux + chrome-headless-shell** 上可靠。
+> macOS / Windows 上 Chrome 会崩或 flag 组合有问题，引擎自动退回
+> `Page.captureScreenshot` + 启发式等待（`stripBeginFrameFlags()`，见
+> `packages/engine/src/services/browserManager.ts`）。
+> **本地 mac 开发是低保真模式，生产渲染需跑 Docker / Linux。**
+> 引擎还会主动 probe `beginFrame` 方法是否存在（近期 chrome-headless-shell 147 上
+> `HeadlessExperimental.enable` 成功但 `beginFrame` 方法缺失），任何失败都按不支持处理。
+
+**坑 3 · Chrome 停止推进事件循环**
+`--enable-begin-frame-control` 生效后主线程不再自己 tick：没有帧回调、没有 `setTimeout`、
+任务间不排空微任务。渲染期间是好事，**页面加载期间是灾难** ——
+`document.fonts.ready` 是靠 task resolve 的 promise，没有 tick 就永远挂着。
+GSAP 脚本加载完、timeline 注册好、`__hf.seek` 接好，然后卡死在 fonts。
+
+修法是 **warmup 循环**：加载期间每 33ms 发一个 `noDisplayUpdates: true` 的 beginFrame，
+只推事件循环不出帧；等 `window.__hf` 就绪且字体加载完就杀掉循环，
+再从一个超过 warmup 范围的帧时间开始真实捕获（避免合成器看到时间倒流）。
+
+**坑 4 · Puppeteer 的 `waitForFunction` 失效**
+它底层在注入世界里用 rAF 轮询，而 rAF 在 beginFrame 模式不触发，
+于是和 `fonts.ready` 一样挂住，还丢掉了 Puppeteer 的友好报错。
+修法是不用它，自己写 `evaluate` + `setTimeout` 的轮询循环。
+
+**今天实际跑的 capture loop：**
+
+```javascript
+for (let i = 0; i < totalFrames; i++) {
+  const time = quantizeTimeToFrame(i / fps, fps);
+  await page.evaluate(t => window.__hf.seek(t), time);
+  const { buffer } = await beginFrameCapture(page, options, frameTicks, interval);
+  writeFileSync(`frame_${i}.jpg`, buffer);
+}
+```
+
+一次 seek、一次 beginFrame、一帧落盘。无重试、无 flaky 帧。
+（`hasDamage=false` 时复用上一帧缓存 —— 合成器已暂停，此时再调
+`Page.captureScreenshot` 会超时。）
+
+### 2.3 GSAP Timeline 注册协议与合成模型
+
+```javascript
+// 框架在任何脚本运行前初始化 window.__timelines = {}
+// 每个合成必须有且仅有一个 paused timeline，synchronously 注册
+window.__timelines["<composition-id>"] = gsap.timeline({ paused: true });
+// key 必须严格等于 root 元素的 data-composition-id
+```
+
+规则：所有 timeline 必须 `{ paused: true }`；框架**自动**把子 timeline 嵌进父级
+（不要手动 add）；timeline 必须有限（无无限循环/repeat）。
+
+**属性正确写法**（⚠️ 旧版本文档此处写成 `data-time-in`/`data-time-out`，
+这两个属性**不存在**；`data-layer` / `data-end` 是已废弃别名）：
 
 ```html
 <!-- 独立合成：root 直接在 <body>，禁止 <template> 包裹 -->
-<div data-composition-id="hero" data-duration="5">
-  <div class="clip" data-track-index="0" data-time-in="0" data-time-out="5">
-    <!-- 场景内容 -->
+<div id="root" data-composition-id="hero"
+     data-width="1920" data-height="1080" data-duration="5">
+  <!-- clip 必须是 composition root 的直接子元素 -->
+  <div id="el-1" class="clip"
+       data-start="0" data-duration="5" data-track-index="0">
+    <!-- 场景内容；要包装/变换就把 wrapper 放在 clip 内部 -->
   </div>
 </div>
 
 <!-- 子合成：root 必须在 <template> 内 -->
 <template>
-  <div data-composition-id="cta-overlay" data-duration="3">...</div>
+  <div data-composition-id="cta-overlay" data-width="1920" data-height="1080">...</div>
 </template>
 ```
 
-**最容易触发 silent bug 的三条规则（自动化检查可能漏掉）：**
-1. Root 必须有明确 px 尺寸（`width`/`height`），否则内容塌陷到左上角
-2. 全屏背景必须放在 `position:absolute; inset:0` 的子 clip 里，**不能**设在 `#root` 上（渲染器会丢掉 root 的 background，Preview 看起来正常但渲染出来是黑色）
+| 属性 | 位置 | 说明 |
+|------|------|------|
+| `data-composition-id` | root | 必填，需匹配 `window.__timelines` 的 key |
+| `data-width` / `data-height` | root | **必填**，像素帧尺寸（1920x1080 / 1080x1920 / 1080x1080）|
+| `data-duration` | root | 渲染总时长，**非** timeline 长度；编译期读一次（脚本或 `--variables` 改不动）|
+| `data-fps` | root | 可选帧率提示，CLI render flag 可覆盖 |
+| `class="clip"` | 可见定时元素 | **必填**，缺失则元素全程可见、`data-start`/`data-duration` 被忽略；`<video>`/`<audio>` 省略 |
+| `data-start` | clip | 必填，秒数或对另一 clip ID 的相对引用（该 clip 结束时开始）|
+| `data-duration` | clip | `div`/`img`/子合成宿主必填；video/audio 可默认取媒体时长 |
+| `data-track-index` | clip | 必填，轨道号，决定 z 序（越大越前）；同轨道 clip 不可重叠 |
+| `data-media-start` | video/audio | 源文件内的裁切偏移（秒）|
+
+关于 root `data-duration` 的**条件必填**：当运行时能自动推断时长时可省略
+（已注册的 GSAP timeline、有限的 CSS animation、有限的 WAAPI `element.animate()`、
+已注册的 Lottie）。**Three.js 无法推断，必须手写**；无限/无界 CSS/WAAPI 动画、
+以及完全没有动画信号的合成也必须手写。`lint` 用 `root_composition_missing_duration_source` 强制。
+
+> 官方在线文档（`hyperframes.heygen.com/reference/html-schema`）写的是
+> "duration 来自 `tl.duration()`，不要在 composition 元素上加 `data-duration`" ——
+> 那是面向纯 GSAP 场景的简化表述，与本地 skills 的条件必填规则不冲突。
+> **clip-weave 以本地 `hyperframes-core/references/data-attributes.md` 为准。**
+
+**可见窗口两端都是闭区间**：clip 在 `start ≤ t ≤ start + duration` 期间显示，
+在 `t = start + duration` 这一帧仍会渲染，所以落在 `data-duration` 上的入场动画
+在最后一帧是可见的，不需要提前结束。
+
+**最容易触发 silent bug 的四条规则（自动化检查可能漏掉）：**
+1. Root 必须有明确 px 尺寸，否则内容塌陷到左上角
+2. 全屏背景必须放在 `position:absolute; inset:0` 的子 clip 里，**不能**设在 `#root` 上
+   （渲染器会丢掉 root 的 background，Preview 正常但渲染出来是黑色）
 3. 整个 assembled page 内 `id` 不能重复（跨文件的 `<video id="xxx">` 重复会渲染成空白）
+4. **clip 必须是 composition root 的直接子元素** —— 套在 wrapper `<div>` 里的 clip
+   不会被注册。最明显的症状是 wrapper 里的 `<video>` 从不被 seek/解码，渲染全黑
+
+### 2.4 视频当翻页画册：不让 Chrome 解码
+
+让浏览器在渲染时播 `<video>` 行不通：无头 + BeginFrame 下解码器会丢帧、解码失败、
+或 `readyState: 0` 卡到超时；即便不开 BeginFrame，不同机器不同编解码路径
+对同一合成也会产出不同结果。**网页上的 `<video>` 丢帧无所谓，视频渲染器不行。**
+
+所以把解码权从 Chrome 拿走：
+
+1. 捕获开始前，FFmpeg 按目标 fps 把合成里每个 `<video>` 预抽成编号 JPEG
+   （5 秒 30fps = 150 个文件）
+2. 捕获时，为当前帧上每个活跃视频注入一个 `<img>` 兄弟节点（帧字节做 data URI），
+   隐藏原 `<video>`
+
+```html
+<!-- 之前 -->
+<video data-start="2" data-duration="5" src="clip.mp4" />
+
+<!-- 捕获时，150 帧中的第 60 帧 -->
+<video style="visibility: hidden" ... />
+<img src="data:image/jpeg;base64,..." class="__render_frame__" />
+```
+
+关键在于让 `<img>` 长得和它替换掉的 `<video>` 一模一样，这样 GSAP tween、CSS transform、
+opacity 淡入、`object-fit` 规则全都照常生效 —— 引擎读原元素的 computed style
+（position / transform / opacity / objectFit 等十几个属性）逐个拷到注入的 img 上。
+**从动画库的视角看什么都没变**，元素还在原位、样式一样，只是显示一张每帧都换的静态图。
+
+实现位置：`packages/engine/src/services/videoFrameInjector.ts`。
+这也解释了 `media_in_subcomposition` 规则（§7）为什么存在 —— 注入逻辑依赖
+`<video>` 位于宿主 root 的直接子元素这一结构假设。
+
+**三种路线对比：**
+
+| 框架 | 做法 | 取舍 |
+|------|------|------|
+| **HyperFrames** | FFmpeg 提前全量解码 → 从磁盘供 JPEG | 管线最短；难处理 blob URL / 流式源 / 动态改 `src` |
+| Remotion | 常驻 Rust 合成器按需解码，HTTP 供给 `<OffthreadVideo>` | 更灵活，架构更重 |
+| Replit | 浏览器内 mp4box.js demux + WebCodecs 解码 → 画进 canvas | 全前端，复杂度高 |
+
+### 2.5 其余确定性陷阱
+
+**字体网络请求**。多数合成用 `@import url(fonts.googleapis.com/...)`，
+渲染时这是抛硬币 —— 网络快慢/是否被墙决定字体在第一帧之前还是之后到。
+解法：编译期把所有 Google Fonts `@import` 重写成本地 base64 内嵌的 `@fontsource` 副本
+（`packages/producer/src/services/deterministicFonts.ts`）。视觉完全一致，去掉网络往返和抖动。
+
+**时间量化**。30fps 每帧 33.3333ms。若一条路径算出 `seek(0.0333333)`、
+另一条边缘路径重算出 `0.0333334`，必须落到同一帧。所以每次 seek（预览和渲染都一样）
+都过一遍量化器：
+
+```javascript
+function quantizeTimeToFrame(time, fps) {
+  return Math.round(time * fps) / fps;
+}
+```
+
+一行代码，但没有它，两条算出同一标称时间的路径会产出差一个像素的帧
+（`packages/core/src/inline-scripts/parityContract.ts`）。
+
+**作者侧契约**（违反则前面所有工程都白做）：
+- 禁止 `Date.now()`、`performance.now()`、非 seed 的 `Math.random()`
+- 禁止渲染时发网络请求
+- 禁止 `repeat: -1`（无限循环）—— 渲染器无法推算帧数
+- 禁止 `setTimeout`、`requestAnimationFrame`、`Promise` 内建 timeline
+- 禁止在页面加载时 `gsap.set()` 后面场景的 clip 元素（那些 clip 加载时不在 DOM 里，见 §7.2）
+
+### 2.6 预览一致性与并行渲染
+
+**一致性是强制的，不是"希望如此"**：Studio 预览（iframe 内）和无头渲染跑
+**同一个** `window.__hf` runtime bundle，渲染器启动前校验 bundle 的 sha256
+与 manifest 是否匹配。所以"预览里看到的"字面上就是产出 MP4 的那段代码。
+
+**长视频并行**：帧被切分到 N 个 Chrome 进程，各 worker 渲染自己那份，
+最后 FFmpeg 拼接各 worker 的 MP4 chunk。
+
+> ⚠️ **已知问题**：视频密集的合成在并行模式会超时 ——
+> Chrome 无法同时 seek 多个 `<video>` 而不耗尽解码器。
+> 官方给的修法就是对视频密集渲染退回单 worker。
+> 另有 `Another frame is pending` 错误：并行渲染打满 CPU 时出现，
+> 引擎指数退避重试 5 次后报错。
+> **clip-weave 影响**：写实镜头混合路径（P3）产出的合成属于视频密集类型，
+> 渲染耗时无法靠并行降低，排期需按单 worker 估算。
 
 ---
 
@@ -303,7 +521,7 @@ npx skills add heygen-com/hyperframes --full-depth      # 手动安装（必须�
 | `hyperframes-keyframes` | seek-safe 关键帧写法：GSAP timeline、CSS keyframes、SVG 变形/描边、3D 深度；`hyperframes keyframes` 诊断工具 | 复杂关键帧 |
 | `hyperframes-creative` | 非动效创意方向：frame.md/design.md 处理、调色板、字体、叙事、beat 节奏规划、音频响应 | 设计决策 |
 | `hyperframes-cli` | CLI 所有命令完整用法（init/capture/check/render 等）| 任何 CLI 操作 |
-| `hyperframes-registry` | 50+ 预制组件的安装（`npx hyperframes add <block>`）和用法 | 复用现有组件 |
+| `hyperframes-registry` | 预制组件的安装（`npx hyperframes add <block>`）和用法。本地 registry 实测 **109 blocks + 25 components + 13 examples**（官方文档口径 "150+ blocks and components"）| 复用现有组件 |
 | `media-use` | 媒体 OS：BGM/SFX/图片/logo/TTS/转写/背景移除；`audio.mjs` 统一音频引擎；`.media/manifest.jsonl` 追踪溯源 | 任何媒体资产 |
 | `figma` | 从 Figma 导入素材、design tokens、组件、storyboard 帧（REST + MCP）| Figma 来源 |
 
@@ -323,6 +541,10 @@ npx skills add heygen-com/hyperframes --full-depth      # 手动安装（必须�
 | `full_bleed_background_on_root` | 全屏背景必须放在 `position:absolute; inset:0` 的子 clip 里，**不能**直接设在 composition root 的 `background` 上（渲染器会丢掉 root background）| ❌ silent bug，预览正常但渲染黑屏 | — |
 | `root_must_be_sized` | Root `data-composition-id` 元素必须有明确 px 尺寸，所有祖先到 `height:100%` 元素都要有 resolved height | ❌ 自动门控可能漏掉 | — |
 | `gsap_repeat_ceil_overshoot` | 有限循环的 repeat 计算用 `Math.floor` 不能用 `Math.ceil`（ceil 会超出 data-duration，触发 lint 错误） | ✓ lint 检测 | — |
+| `clip_must_be_direct_child` | clip 必须是 composition root 的**直接子元素**。套在 wrapper `<div>` 里的 clip 不会被注册；要包装/变换就把 wrapper 放进 clip 内部，或直接动画 clip 本身 | ❌ silent bug（wrapper 里的 `<video>` 从不被 seek，渲染全黑）| — |
+| `clip_class_required` | 可见定时元素必须带 `class="clip"`，缺失则元素**全程可见**、`data-start`/`data-duration` 被完全忽略。`<video>`（框架直管可见性）和 `<audio>`（无视觉）省略 | ❌ silent bug | — |
+| `root_composition_missing_duration_source` | root `data-duration` 在运行时无法推断时长时必填（Three.js、无限 CSS/WAAPI 动画、无动画信号）。root 的 `data-duration` 编译期读一次，脚本或 `--variables` 改不动；clip 的 `data-duration` 则从活 DOM 重读，可被脚本驱动 | ✓ lint 检测 | — |
+| **已废弃属性别名** | `data-layer` → 用 `data-track-index`；`data-end` → 用 `data-duration`。**`data-time-in` / `data-time-out` 不存在**（旧版本文档误写，源码中无任何引用）| — | 旧文档示例用了 `data-time-in`/`data-time-out` |
 
 ### 7.1 media_in_subcomposition 的正确检测方式
 
@@ -343,7 +565,7 @@ gsap.set("#scene2-element", { opacity: 0 });
 // tl.set("#element", { autoAlpha: 0 }, 0);  // 这对 non-clip 元素是可以的
 
 // ✓ 正确：在 timeline 内、clip 的 data-start 时间点之后设置
-tl.set("#scene2-element", { opacity: 0 }, 2.0); // clip 的 data-time-in 时间
+tl.set("#scene2-element", { opacity: 0 }, 2.0); // 该 clip 的 data-start 时间
 ```
 
 ---
@@ -416,3 +638,40 @@ HF 的 Step 5 并行子 agent 之所以能减少遗忘，是因为 `frame-packet
 分析其叙事结构、动效语法、设计 tokens，再适配品牌素材，
 远比让 agent 从零创作更快、质量更稳定。
 
+### 9.6 渲染环境的平台约束（2026-07-29 补充）
+
+§2.2 的 BeginFrame 确定性捕获**只在 Linux 上可靠**，macOS/Windows 自动退回
+截图 + 启发式等待模式。这对 clip-weave 有三个直接影响：
+
+| 影响 | 说明 | 应对 |
+|------|------|------|
+| 本地 mac 渲染是低保真 | 可能出现"重跑一次就对"的 flaky 帧 | 本地只做开发/预览；交付渲染走 Docker(Linux) 或 `cloud render` / `lambda render` |
+| flaky 帧会污染 check 结果 | mac 上 `check` 报的 layout/runtime 错误可能是捕获竞态而非真错 | Rule Guard 遇到 mac 上不可复现的 check 失败，先在 Linux 复核再交给 LLM 修 |
+| 视频密集合成不能并行 | Chrome 解码器不足，并行会超时；只能单 worker | P3 写实镜头路径的渲染耗时按单 worker 估算，不要按并行折算 |
+
+---
+
+## 10. 信息来源
+
+本文档 §1、§3–§9 基于 `~/workspace/hyperframes/`（packages/ + skills/）源码阅读。
+§2 于 2026-07-29 对照以下官方来源重写并交叉验证：
+
+- [HTML to Video: How HyperFrames Solved AI Video Rendering](https://www.heygen.com/research/html-to-video) —— HeyGen 官方研究文章，§2 的 seek 契约、BeginFrame 四个坑、视频翻页画册、确定性陷阱均出自此文
+- [Introduction to Hyperframes](https://developers.heygen.com/hyperframes-overview) —— 官方产品概述（核心概念、渲染方式、组件库口径）
+- [HTML Schema Reference](https://hyperframes.heygen.com/reference/html-schema) —— 官方 data-* 属性与 timeline 契约参考
+- [heygen-com/hyperframes](https://github.com/heygen-com/hyperframes) —— 开源仓库
+
+**本地源码交叉验证点**（官方描述与本地实现一致）：
+
+| 官方描述 | 本地源码位置 |
+|---------|------------|
+| BeginFrame 原子捕获 + `hasDamage` 帧缓存 | `packages/engine/src/services/screenshotService.ts` |
+| 9 个 flag + 非 Linux 剥离回退 + beginFrame 能力探测 | `packages/engine/src/services/browserManager.ts`（`BEGINFRAME_ONLY_FLAGS` / `stripBeginFrameFlags` / `probeBeginFrameSupport`）|
+| 视频帧预抽 + `<img>` 注入 | `packages/engine/src/services/videoFrameInjector.ts`、`frameCapture.ts` |
+| Google Fonts → 本地 base64 重写 | `packages/producer/src/services/deterministicFonts.ts` |
+| `quantizeTimeToFrame` 时间量化 | `packages/core/src/inline-scripts/parityContract.ts` |
+| data-* 属性表（含废弃别名）| `skills/hyperframes-core/references/data-attributes.md` |
+
+> 内容已改写以符合来源的授权限制。
+> **存在分歧时以本地 skills 文档为准** —— 在线文档为面向通用场景的简化表述，
+> 本地版本是 clip-weave 实际调用的那一份。

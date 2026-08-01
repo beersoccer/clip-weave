@@ -1,7 +1,11 @@
 # clip-weave 架构方案
 
-> 文档版本：v6.0 | 更新日期：2026-07-27
+> 文档版本：v6.1 | 更新日期：2026-07-29
 > HF 能力分析见 `hyperframes-analysis.md`；技术选型见 `tech-selection.md`
+>
+> **v6.1 变更**：新增 § 3.2.1 Rule Guard 实现状态与待办（源码核对）；
+> Kling Bridge → T2V Bridge（复用 STORYBOARD.md 走文生视频，跳过写 HTML）；
+> § 9 移除误导性成本表；§ 10 HeyGen 内网屏蔽已解决，待切云厂商账号。
 
 ---
 
@@ -31,8 +35,8 @@ clip-weave 补位（HF 缺失或用户体验不足）：
 | Intent Router | 用户对话/YAML → HF workflow 选择 + BRIEF.md 自动生成 |
 | Asset Matcher | asset-descriptions.md → 语义匹配 → STORYBOARD `asset_candidates` |
 | Rule Guard | 生成前后确定性规则守卫，绕开 LLM 上下文压缩导致的规则遗忘 |
-| Fix Registry | 已知错误模板化修复，避免 lint 循环反复烧 token |
-| Kling Bridge | 写实镜头混合（P3） |
+| Fix Registry | 已知错误定位 + 模板化修复，避免 lint 循环反复烧 token |
+| T2V Bridge | 复用 `STORYBOARD.md` 交文生视频模型直出写实镜头，跳过写 HTML（P3）|
 
 ---
 
@@ -73,10 +77,27 @@ clip-weave 补位（HF 缺失或用户体验不足）：
    → renders/output.mp4
        │
        ▼
-⑦（可选，P3）Kling 写实镜头 + FFmpeg 合流
+⑦（P3）T2V 旁路：STORYBOARD.md → 文生视频模型 → FFmpeg 合流
+   与 ④⑤⑥ 并列的第二条渲染路径，跳过写 HTML
 ```
 
 **关键：** 步骤 ①②③⑤ 是 clip-weave 独有价值，④⑥完全委托 HF。
+
+**两条渲染路径共用同一份 `STORYBOARD.md`：**
+
+| | HTML 路径（④⑤⑥）| T2V 旁路（⑦，P3）|
+|---|---|---|
+| 做法 | LLM 写 HTML/CSS/GSAP → HF 逐帧渲染 | 分镜描述直接交文生视频模型 |
+| 画面性质 | 图形/文字/UI/图表，代码级精度 | 写实画面、实景、镜头运动 |
+| 可控性 | 每帧可复现 | 有随机性，靠改提示词迭代 |
+| 主要开销 | LLM 写 + `check` 循环的时间 | 模型推理费用与排队 |
+| 不适合 | 电影级写实、真人出镜、复杂物理 | 精确文字排版、品牌色严格一致、数据准确性 |
+
+因为共用 STORYBOARD.md，选哪条路径是**分镜级别**的决策而非项目级别 —— 这是 P4 混排的基础。
+
+> ⚠️ 混排必须在 **FFmpeg 层合流**，不要把 T2V 生成的片段当 `<video>` 塞进 HTML 合成。
+> 原因：Chrome 无法同时 seek 多个 `<video>`（解码器耗尽），视频密集合成会退化为单 worker
+> 甚至超时。详见 `hyperframes-analysis.md` § 2.6 / § 9.6。
 
 ---
 
@@ -108,22 +129,72 @@ Python 层确定性规则检查器，**不依赖 LLM 记忆**：
 **第 1 层：Pre-flight 本地拦截（<1s）**
 Rule Guard 在 Python 层跑，能拦截的错误绝不进入 `npx check`。
 
-**第 2 层：Fix Registry 确定性修复（无 LLM 参与）**
+**第 2 层：Fix Registry（`rule_guard.py` 的 `_FIXERS` 注册表）**
 
-| 错误模式 | 处理方式 |
-|--------|---------|
-| GSAP `x/y:` + CSS `translateX/Y()` 共存 | **无自动修复**（pixel→percent 语义不等价）。报告违规行 + 手动修复模板：`left: calc(50% - <half-width>px)` 替换 `transform: translateX(-50%)` |
-| `<video>` 出现在 compositions/*.html | 报告位置；需手动上提到 index.html |
-| 页面加载时 `gsap.set()` 作用于后续场景的 clip | 报告；改用 `tl.set()` 放入 timeline |
-| `preserve-3d` 祖先带 `filter` | 报告；手动把 filter 下移到叶子元素 |
+设计上按 `rule_id` 查表，分两条出路：修复机械且语义等价 → Python 直接改写 HTML 落盘、
+标记 `fixed`、跳过 LLM 回合；修复涉及语义判断 → 输出违规位置 + 修复模板，回落给 HF skill。
 
-命中已知模式 → Python 直接改 HTML → 跳过 LLM 修复回合。仅未知错误才回落到 HF skill。
+| 错误模式 | 处理方式 | 有自动 fixer？ |
+|--------|---------|--------------|
+| GSAP `x/y:` + CSS `translateX/Y()` 共存 | 报告违规行 + 模板：`left: calc(50% - <half-width>px)` 替换 `transform: translateX(-50%)` | ❌ **刻意不做** —— pixel→percent 语义不等价，机械替换会让元素位移错误 |
+| `<video>` 出现在 compositions/*.html | 报告位置；需上提到 index.html root 直接子元素 | ❌ 未实现（见 § 3.2.1）|
+| 页面加载时 `gsap.set()` 作用于后续场景的 clip | 报告；改用 `tl.set(sel, vars, time)` 放入 timeline | ❌ 未实现 —— 需推断目标 clip 的 `data-start` |
+| `preserve-3d` 祖先带 `filter` | 报告；把 filter 下移到叶子元素 | ❌ 未实现 —— 需判断哪个叶子该承载 filter |
 
-**第 3 层：修复历史 + 增量 check**
-- 每个 composition 记录已修复错误签名（错误类型 + 位置指纹），Rule Guard 检测到"同签名再次出现"→ 强制走 Fix Registry 兜底，不再交给 LLM
+**第 3 层：违规指纹 + 增量 check**
+- 每个违规算 `sha1(rule_id + 文件名 + 行号)[:12]` 指纹，落盘到
+  `<project>/.clip-weave/guard-history.json`，用于识别"同一错误第二次出现"
 - 只 check 本次变更的 composition（`npx hyperframes check <file>`），未变更的跳过
 
-**预期效果：** 已知错误 100% 拦截在 Python 层（0 token 消耗），LLM 只处理真正新出现的问题；长视频 lint 循环总时长和 token 消耗预计降 30-50%。
+**预期效果：** 拦截在 Python 层的错误 0 token 消耗，LLM 只处理真正新出现的问题；
+长视频 lint 循环总时长和 token 消耗预计降 30-50%（预估口径，尚待长视频实测）。
+
+### 3.2.1 实现状态与待办（2026-07-29 核对源码）
+
+> 汇报材料（`report-tech-leads.md`）只讲设计与已跑通部分，本节是准确底账。
+
+**已实现并有测试覆盖：**
+
+| 能力 | 位置 | 说明 |
+|------|------|------|
+| 4 条规则检测器 | `rule_guard.py` 的 4 个 `_check_*` 函数 | 输出 `rule_id` + 文件 + 行号 + 说明 |
+| 误报抑制 | `_check_gsap_timeline_set_initial_hide` | 缩进 > 4 空格视为在回调内（ScrollTrigger / onComplete）→ 跳过 |
+| 违规指纹计算与持久化 | `Violation.__post_init__` + `save_history()` | 写入 `.clip-weave/guard-history.json`，追加不覆盖 |
+| 增量 check | `hyperframes.py` 的 `check(project_dir, file=None)` | 支持单文件 |
+| Fix Registry 分流骨架 | `scan()` 内 `_FIXERS.get(rule_id)` 分支 | fixer 存在则改写落盘并记 `fixed`，否则记 `unknown` |
+
+**两处尚未接入：**
+
+**① `_FIXERS` 注册表为空 → 无任何自动修复**
+
+```python
+_FIXERS: dict = {}   # rule_guard.py:111，当前无条目
+```
+
+后果：`_FIXERS.get(rule_id)` 恒为 `None`，4 条规则的违规全部走 `else` 分支进入
+`result.unknown`，`result.fixed` 在实际运行中始终为空。
+**第 2 层当前的实际价值是精确定位（文件 + 行号 + 修复模板），不是自动修。**
+
+**② 指纹只写不读 → "复现即换策略"未生效**
+
+`save_history()` 内部虽然读取旧文件，但那只是为了追加合并后写回；
+代码库中没有任何位置消费 `guard-history.json` 做决策。
+因此"同签名再次出现 → 强制走 Fix Registry 兜底，不再交给 LLM"这条控制逻辑不存在，
+指纹目前是一份日志而非控制信号。
+
+**附带问题：指纹对行号敏感。** 当前指纹含行号，而 LLM 重写整个 composition 后行号极易漂移，
+同一语义错误换行号即变成新指纹，识别不出复现。这是实现强制分流前必须先解决的前置问题。
+
+**待办清单（按性价比排序）：**
+
+| # | 待办 | 工作量 | 判断 |
+|---|------|--------|------|
+| 1 | 指纹改为行号无关（`rule_id` + 违规代码片段规范化哈希） | 小 | **优先做** —— 强制分流的前置条件，当前指纹形同失效 |
+| 2 | 消费 `guard-history.json`：同指纹复现 → 不再交 LLM，直接报告并升级为人工介入 | 小 | **优先做** —— 直接解 `check → 改 → 再 check` 死循环 |
+| 3 | `media_in_subcomposition` 自动 fixer：把 `<video>`/`<audio>` 节点搬到 `index.html` root 直接子元素 | 中 —— 需保持 `id`、样式引用、GSAP 选择器不断 | 值得做 —— 这条是 lint 显式盲点，且修法最接近机械 |
+| 4 | `gsap.set()` → `tl.set()` 自动 fixer | 中 —— 需解析目标 clip 的 `data-start` 作为插入时间 | 可做，风险中等 |
+| 5 | `preserve-3d + filter` 自动 fixer | 大 —— 需判断 filter 该落到哪个叶子元素 | 暂不做，保持报告 |
+| 6 | GSAP transform 冲突自动 fixer | 大且有风险 | **明确不做** —— 语义不等价，见上表 |
 
 ### 3.3 素材利用率低
 
@@ -288,7 +359,7 @@ clip-weave/
 │   │   ├── hyperframes.py              # HF CLI 封装（init/capture/check/render）
 │   │   ├── rule_guard.py               # 规则守卫 + Fix Registry
 │   │   ├── asset_matcher.py            # 素材语义匹配
-│   │   └── kling.py                    # image-to-video（P3）
+│   │   └── t2v.py                      # 文生视频旁路：STORYBOARD.md → 视频片段（P3，待建）
 │   └── core/
 │       ├── intent_router.py            # 用户输入 → workflow + BRIEF.md
 │       ├── project_factory.py          # BRIEF.md + capture/ + frame.md 组装
@@ -354,26 +425,32 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 | 阶段 | 目标 | 核心交付 | 状态 |
 |------|------|---------|------|
 | **P0** | 打通链路：意图 → HF autonomous 执行 | Intent Router；BRIEF.md 生成器；Project Factory（`init` + `capture` 封装）；Delegator；`skills/clip-weave/` 入口 skill | ✅ 完成 |
-| **P1** | 解决 lint 痛点 | 4 条 HF 高频规则检测器；4 条确定性 fixer；修复历史签名追踪 | ✅ 完成 |
-| **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + BM25 top-K 检索）；capture 噪声过滤 | ✅ 完成 |
-| **P3** | 写实镜头混合路径 | Kling image-to-video 封装；FFmpeg 合流；STORYBOARD `visual_type` 路由 | 🔲 待验证 |
-| **P4** | ViMax 全 AI 真实影像（可选） | `adapters/vimax.py`；screenplay 转换 | 🔲 P3 验证后 |
+| **P1** | 解决 lint 痛点 | 4 条 HF 高频规则检测器；Fix Registry 分流骨架；违规指纹持久化；增量 check | ✅ 完成（2 项未接入，见 § 3.2.1）|
+| **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + Embedding/BM25 top-K 检索）；capture 噪声过滤 | ✅ 完成 |
+| **P3** | **T2V 旁路** | 复用 `STORYBOARD.md` 交文生视频模型直出，跳过写 HTML；FFmpeg 合流；`visual_type` 路由 | 🔲 待验证 |
+| **P4** | 两条路径混排 | 同一支视频内动效镜头（HTML 路径）与写实镜头（T2V 路径）并存，FFmpeg 层合流 | 🔲 P3 验证后 |
 
-**当前状态**：P0–P2 全部交付，29 个测试通过。P3 是下一个里程碑。
+**当前状态**：P0–P2 全部交付，33 个测试通过。P3 是下一个里程碑。
+
+> **P1 的两处未接入**（`_FIXERS` 空、指纹只写不读）不影响 P0–P2 的可用性 ——
+> 第 1 层 Pre-flight 拦截和增量 check 都已生效。详见 § 3.2.1 待办清单。
 
 ---
 
-## 9. 成本参考
+## 9. 开销参考
 
-以 30s 视频、写实镜头占比 40%（12s）为例：
+> 原 v6.0 的美元成本对照表已移除 —— 只覆盖模型调用费，漏掉了最大的成本项（生成时间与迭代轮数），
+> 容易给出误导性结论。改为按主要开销类型区分。
 
-| 路径 | 成本 | 适用场景 |
-|------|------|---------|
-| 纯 HyperFrames | ~$0.05 | 全动效/文字视频（品牌发布、数据可视化） |
-| HF + Kling 混合 | ~$1.7（Kling 12s × $0.14） | 含写实镜头的品牌视频 |
-| HF + ViMax | ~$5–15 | 全 AI 真实影像 |
+| 路径 | 主要开销 | 说明 |
+|------|---------|------|
+| HTML 路径 | **时间** —— LLM 写 composition + `check` 循环 | 模型调用费极低（30s 视频量级 ~$0.05）；瓶颈是每次 `check` 10-30s × 每合成 2-3 轮 |
+| T2V 旁路（P3）| **推理费用 + 排队** | 按秒计费，且长视频需排队；时间不可控性来自服务端 |
 
-**Rule Guard 预计带来的节省**：拦截已知模式在 Python 层零 token 处理，长视频（10+ compositions）lint 环节 token 消耗预计降 30-50%。
+**Rule Guard 预计带来的节省**：拦截在 Python 层的错误零 token 处理，
+长视频（10+ compositions）lint 环节耗时与 token 消耗预计降 30-50%。
+该数字为预估口径，尚待长视频实测；且当前 `_FIXERS` 为空（§ 3.2.1），
+节省主要来自第 1 层 Pre-flight 拦截与增量 check，而非自动修复。
 
 ---
 
@@ -384,8 +461,11 @@ clip-weave 通过 `STORYBOARD.md` frontmatter 传递音频参数，不重造音�
 
 ### 10.1 HeyGen 音频（推荐 — 在线，支持中文）
 
-> **当前状态**：`api.heygen.com` 被企业内网屏蔽（curl timeout，HTTP 000）。HeyGen TTS/BGM 暂不可用。
-> API Key 已写入 `~/.heygen/credentials`，一旦网络放通（VPN 或 IT 白名单 `api.heygen.com:443`）立即可用，无需重新配置。
+> **当前状态（2026-07-29 更新）**：`api.heygen.com` 内网屏蔽问题**已解决**。
+> 已用 HeyGen **个人账号**验证通过：TTS 配音 + 版权 BGM 均可用，中文声线质量满足要求。
+>
+> **待办**：切换到公司已采购的云厂商账号/额度，走合规通道。个人账号仅用于能力验证，
+> 不作为交付路径。切换后凭证仍在 `~/.heygen`，`STORYBOARD.md` 的 `music` / `voice` 字段无需改动。
 
 HeyGen 提供高质量 TTS（含中文声线）和版权音乐库。需要帐号授权：
 
