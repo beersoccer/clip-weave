@@ -356,3 +356,86 @@ def test_concat_surfaces_ffmpeg_failure(tmp_path, monkeypatch):
 
     with pytest.raises(VideoGenError, match="ffmpeg concat failed"):
         concat_clips([clip], tmp_path / "full.mp4", report=lambda _: None)
+
+
+# ── render: mixed frame filtering ─────────────────────────────────────────────
+
+MIXED_STORYBOARD = """---
+format: 1920x1080
+message: "test message"
+---
+
+## Frame 1 — 图表
+- scene: 数据柱状图
+- visual_type: motion
+- duration: 5s
+
+## Frame 2 — 实拍
+- scene: 城市夜景
+- visual_type: live_action
+- duration: 5s
+
+## Frame 3 — 未标注
+- scene: 第三个镜头
+- duration: 5s
+"""
+
+
+def test_mixed_render_default_skips_html_routed_frames(tmp_path):
+    """render_default='mixed' + visual_type: motion means frame 1 gets no T2V clip.
+
+    Frame 3 has no visual_type at all. Per frame_path()'s own contract (see
+    test_unannotated_frame_defaults_to_t2v_under_mixed below), an unannotated
+    frame under a "mixed" project resolves to "html" and is excluded too — only
+    frame 2 (visual_type: live_action) survives.
+    """
+    model = FakeModel()
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed")
+
+    assert [r.index for r in results] == [2]
+    assert len(model.submitted) == 1
+
+
+def test_mixed_render_default_generates_live_action_frames(tmp_path):
+    model = FakeModel()
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed")
+
+    by_index = {r.index: r for r in results}
+    assert by_index[2].state == "succeeded"
+    assert "城市夜景" in model.submitted[0].prompt or "城市夜景" in model.submitted[1].prompt
+
+
+def test_unannotated_frame_defaults_to_t2v_under_mixed():
+    """frame_path({}, "mixed") == "html" per render_path.py's own contract — confirm
+    generate_clips respects that: an unannotated frame in a mixed project is
+    treated as HTML-routed (excluded), matching frame_path's documented default."""
+    from clip_weave.core.render_path import frame_path
+
+    assert frame_path({}, "mixed") == "html"
+
+
+def test_render_default_none_generates_every_frame_unchanged(tmp_path):
+    """No render_default (the pre-existing behavior) must be untouched: every
+    frame gets a clip regardless of visual_type annotation."""
+    model = FakeModel()
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model)  # no render_default passed
+
+    assert [r.index for r in results] == [1, 2, 3]
+
+
+def test_render_default_t2v_generates_every_frame(tmp_path):
+    """render_default='t2v' (not 'mixed') must also generate every frame — the
+    per-frame filter only applies to 'mixed' projects."""
+    model = FakeModel()
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="t2v")
+
+    assert [r.index for r in results] == [1, 2, 3]
+
+
+def test_explicit_frames_still_overrides_mixed_filtering(tmp_path):
+    """--frames stays an unconditional override, same as it already is for
+    plain routing — mixed filtering must not fight an explicit frame list."""
+    model = FakeModel()
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed", frames=[1])
+
+    assert [r.index for r in results] == [1]

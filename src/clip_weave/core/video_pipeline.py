@@ -28,6 +28,7 @@ from clip_weave.adapters.video_gen import (
     looks_like_project_id,
     resolve_project,
 )
+from clip_weave.core.render_path import frame_path
 from clip_weave.core.storyboard import (
     Frame,
     Storyboard,
@@ -79,6 +80,7 @@ def generate_clips(
     duration_overrides: dict[int, int] | None = None,
     negative_overrides: dict[int, str] | None = None,
     reference_overrides: dict[int, str] | None = None,
+    render_default: str | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
     sb = parse_storyboard(storyboard_path)
@@ -88,6 +90,10 @@ def generate_clips(
         raise VideoGenError(f"no frames parsed from {storyboard_path}")
 
     selected = _select(sb, frames)
+    if render_default == "mixed" and not frames:
+        # --frames is an explicit operator override and must win outright — only
+        # filter by visual_type when the caller did not hand-pick frame indices.
+        selected = [f for f in selected if frame_path(f.meta, "mixed") != "html"]
     target_ratio = ratio or sb.aspect_ratio()
     prompt_overrides = prompt_overrides or {}
     duration_overrides = duration_overrides or {}

@@ -312,6 +312,7 @@ def gen_video_cmd(
             provider=provider,
             out_dir=out_dir,
             frames=frame_list,
+            render_default=chosen,
             resolution=resolution,
             ratio=ratio,
             duration=duration,
