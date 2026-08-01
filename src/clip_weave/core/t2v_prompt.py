@@ -279,11 +279,25 @@ def _style_line(palette: str, motion: str) -> str:
     return "; ".join(bits)
 
 
+# GSAP/motion vocabulary that means nothing to a video model. Matches both a
+# bare token (`power3.out`, `spring-pop-entrance`) and one embedded in a longer
+# hyphenated/dotted identifier, so it must be word-bounded on a non-identifier
+# character rather than \b (which does not treat `.`/`-` as boundaries).
+_GSAP_VOCAB = r"(?:gsap[\w.\-]*|power\d\.\w+|spring-pop[\w-]*|sine-wave[\w-]*|stagger\w*|scaleX\w*|tween\w*)"
+
+
 def _clean(text: str) -> str:
-    """Strip HF implementation vocabulary that means nothing to a video model."""
-    text = re.sub(r"\(([^)]*(?:gsap|spring-pop|sine-wave|stagger|scaleX|tween)[^)]*)\)", "", text,
-                  flags=re.IGNORECASE)
+    """Strip HF implementation vocabulary that means nothing to a video model.
+
+    Two passes: first delete an entire parenthetical/backtick span that
+    CONTAINS the vocabulary (preserves the original "drop the whole aside"
+    behavior for `(gsap-effects, spring-pop-entrance)`), then delete any
+    remaining bare occurrence of the vocabulary that was never bracketed at
+    all (`power3.out` sitting directly in a sentence).
+    """
+    text = re.sub(rf"\([^)]*{_GSAP_VOCAB}[^)]*\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"`[^`]*`", "", text)
+    text = re.sub(rf"(?<![\w.\-]){_GSAP_VOCAB}(?![\w])", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 

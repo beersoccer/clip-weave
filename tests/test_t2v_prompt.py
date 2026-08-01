@@ -130,6 +130,37 @@ def parse_markdown_from_text(tmp_path, text):
     return parse_markdown(path)
 
 
+def test_clean_strips_bare_gsap_ease_names_outside_parens(tmp_path):
+    """_clean() must not leak GSAP vocabulary that isn't inside parens/backticks.
+
+    Regression for a leak found while reviewing a sibling fix in storyboard.py:
+    _clean()'s regex only scrubbed tokens INSIDE (...) or `...`, so a bare ease
+    name like `power3.out` sitting outside any bracket reached T2V-PROMPTS.md,
+    the file handed to a video model.
+    """
+    body = """---
+format: 1920x1080
+message: "theme"
+---
+
+## Frame 1 - Chassis
+- duration: 6s
+- blueprint: dataviz-countup
+- sfx: riser
+
+Scene 1 (0-2s): asset scales in (gsap-effects, spring-pop-entrance), counter counts up with power3.out.
+"""
+    path = tmp_path / "STORYBOARD.md"
+    path.write_text(body, encoding="utf-8")
+    sb = parse_storyboard(path)
+
+    doc = build_doc(sb)
+    scene = doc.specs[0].scene
+
+    for leaked in ("power3.out", "gsap-effects", "spring-pop-entrance"):
+        assert leaked not in scene, f"{leaked!r} leaked into the T2V scene slot: {scene!r}"
+
+
 def test_manual_edits_survive_regeneration_guard(tmp_path):
     sb_path = _project(tmp_path)
     load_or_create(sb_path)
