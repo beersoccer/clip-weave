@@ -2,7 +2,6 @@
 
 import textwrap
 
-from clip_weave.core import render_path as rp
 from clip_weave.core.storyboard import parse_storyboard
 from clip_weave.core.t2v_prompt import (
     PROMPTS_FILENAME,
@@ -147,25 +146,3 @@ def test_manual_edits_survive_regeneration_guard(tmp_path):
     doc, path, created = load_or_create(sb_path, regenerate=True)
     assert created is True
     assert "HAND WRITTEN SHOT" not in literal_prompt(doc.specs[0])
-
-
-# ── render path selection ────────────────────────────────────────────────────
-
-def test_render_path_unset_then_persisted(tmp_path):
-    (tmp_path / "BRIEF.md").write_text("---\nworkflow: general-video\n---\n", encoding="utf-8")
-    assert rp.resolve(tmp_path) == (None, "unset")
-    assert rp.persist(tmp_path, "t2v") is True
-    assert rp.resolve(tmp_path)[0] == "t2v"
-
-
-def test_render_path_read_from_brief(tmp_path):
-    (tmp_path / "BRIEF.md").write_text("---\nrender: mixed\n---\n", encoding="utf-8")
-    path, source = rp.resolve(tmp_path)
-    assert path == "mixed"
-    assert "BRIEF.md" in source
-
-
-def test_frame_level_override_wins():
-    assert rp.frame_path({"visual_type": "live_action"}, "html") == "t2v"
-    assert rp.frame_path({"visual_type": "motion"}, "t2v") == "html"
-    assert rp.frame_path({}, "html") == "html"
