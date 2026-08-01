@@ -4,10 +4,11 @@ No real HTTP: a FakeSession records requests and returns canned JSON.
 """
 
 import pytest
+import requests
 
 from clip_weave.adapters.video_gen import VideoGenError, VideoRequest, get_model
 from clip_weave.adapters.video_gen.ali import AliVideoModel
-from clip_weave.adapters.video_gen.base import ProviderConfig
+from clip_weave.adapters.video_gen.base import ProviderConfig, TaskStatus
 from clip_weave.adapters.video_gen.doubao import DoubaoVideoModel
 from clip_weave.adapters.video_gen.vertex import VertexVideoModel
 
@@ -384,3 +385,99 @@ def test_request_exception_becomes_video_gen_error():
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5"), session=ExplodingSession())
     with pytest.raises(VideoGenError, match="request to .* failed"):
         vm.submit(VideoRequest(prompt="p"))
+
+
+# ── VideoModel.download ───────────────────────────────────────────────────────
+
+class FakeStreamResponse:
+    """A context-manager response for `session.get(..., stream=True)`."""
+
+    def __init__(self, chunks, status_code=200):
+        self._chunks = chunks
+        self.status_code = status_code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code}")
+
+    def iter_content(self, chunk_size=None):
+        yield from self._chunks
+
+
+class FakeGetSession:
+    """Only implements the `.get(url, stream=True, timeout=...)` path download() uses."""
+
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return self.response
+
+
+def test_download_streams_an_https_url(tmp_path):
+    session = FakeGetSession(FakeStreamResponse([b"abc", b"def"]))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+    status = TaskStatus(state="succeeded", raw={}, video_url="https://cdn.example.com/v.mp4")
+
+    dest = tmp_path / "out.mp4"
+    result = vm.download(status, dest)
+
+    assert result == dest
+    assert dest.read_bytes() == b"abcdef"
+    assert session.calls[0]["url"] == "https://cdn.example.com/v.mp4"
+    assert session.calls[0]["stream"] is True
+
+
+def test_download_rewrites_gs_url_before_streaming(tmp_path):
+    session = FakeGetSession(FakeStreamResponse([b"payload"]))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+    status = TaskStatus(state="succeeded", raw={}, video_url="gs://my-bucket/videos/v.mp4")
+
+    dest = tmp_path / "out.mp4"
+    vm.download(status, dest)
+
+    assert session.calls[0]["url"] == "https://storage.googleapis.com/my-bucket/videos/v.mp4"
+    assert dest.read_bytes() == b"payload"
+
+
+def test_download_creates_missing_parent_directories(tmp_path):
+    session = FakeGetSession(FakeStreamResponse([b"x"]))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+    status = TaskStatus(state="succeeded", raw={}, video_url="https://cdn/v.mp4")
+
+    dest = tmp_path / "nested" / "dir" / "out.mp4"
+    vm.download(status, dest)
+
+    assert dest.exists()
+
+
+def test_download_decodes_inline_base64_without_any_http_call(tmp_path):
+    import base64
+
+    session = FakeGetSession(FakeStreamResponse([b"should never be read"]))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+    payload = base64.b64encode(b"raw video bytes").decode()
+    status = TaskStatus(state="succeeded", raw={}, video_b64=payload)
+
+    dest = tmp_path / "out.mp4"
+    vm.download(status, dest)
+
+    assert dest.read_bytes() == b"raw video bytes"
+    assert session.calls == []  # no HTTP call for the base64 path
+
+
+def test_download_raises_when_neither_url_nor_b64_is_present(tmp_path):
+    session = FakeGetSession(FakeStreamResponse([]))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+    status = TaskStatus(state="succeeded", raw={})
+
+    with pytest.raises(VideoGenError, match="without a video payload"):
+        vm.download(status, tmp_path / "out.mp4")

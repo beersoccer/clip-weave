@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -25,8 +24,6 @@ logger = logging.getLogger(__name__)
 TaskState = Literal["pending", "running", "succeeded", "failed"]
 
 DEFAULT_TIMEOUT = 60
-DEFAULT_POLL_INTERVAL = 10
-DEFAULT_MAX_WAIT = 900
 
 
 class VideoGenError(RuntimeError):
@@ -162,30 +159,6 @@ class VideoModel:
             raise VideoGenError(
                 f"{self.cfg.name}: non-JSON response from {url} — {resp.text[:200]}"
             ) from exc
-
-    def wait(
-        self,
-        task_id: str,
-        *,
-        interval: int = DEFAULT_POLL_INTERVAL,
-        max_wait: int = DEFAULT_MAX_WAIT,
-        on_state: Any = None,
-    ) -> TaskStatus:
-        """Poll until the task reaches a terminal state or `max_wait` elapses."""
-        deadline = time.time() + max_wait
-        status = TaskStatus(state="pending", raw={})
-        while time.time() < deadline:
-            status = self.poll(task_id)
-            if on_state:
-                on_state(status)
-            if status.state in ("succeeded", "failed"):
-                return status
-            time.sleep(interval)
-        return TaskStatus(
-            state="failed",
-            raw=status.raw,
-            error=f"timed out after {max_wait}s (last state: {status.state})",
-        )
 
     def download(self, status: TaskStatus, dest: Path) -> Path:
         """Persist a finished task's video to `dest`."""
