@@ -1,10 +1,16 @@
 """Which renderer a video (or a single frame) goes through: HTML or T2V.
 
-The choice is the user's, never inferred silently:
+The choice is the user's, never inferred silently, and it uses one vocabulary
+(`html` | `t2v`) at both levels:
 
-  * project level — `render: html | t2v | mixed` in `BRIEF.md` frontmatter
-  * frame level   — `visual_type: motion | live_action` in `STORYBOARD.md`
-                    (`motion` → HTML, `live_action` → T2V)
+  * project level — `render: html | t2v` in `BRIEF.md` frontmatter
+  * frame level   — `render: html | t2v` on a `STORYBOARD.md` frame, overriding
+                    the project default for that one frame
+
+There is no `mixed` project value. Mixing is expressed by annotating the
+individual frames that should NOT follow the project default — the project
+default is still a single html-or-t2v choice, just one that some frames opt out
+of. A frame without a `render:` line follows the project default.
 
 When neither says anything, callers ask once and persist the answer to BRIEF.md,
 so the question is asked at most once per project.
@@ -23,15 +29,12 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-RenderPath = Literal["html", "t2v", "mixed"]
-VALID: tuple[str, ...] = ("html", "t2v", "mixed")
+RenderPath = Literal["html", "t2v"]
+VALID: tuple[str, ...] = ("html", "t2v")
 
 DEFAULT: RenderPath = "html"
 
 _RENDER_LINE = re.compile(r"^(render|render_path)\s*:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE)
-
-_FRAME_HTML = ("motion", "html", "graphic", "graphics")
-_FRAME_T2V = ("live_action", "live-action", "t2v", "footage", "realistic")
 
 
 def resolve(project_dir: str | Path) -> tuple[RenderPath | None, str]:
@@ -68,13 +71,17 @@ def persist(project_dir: str | Path, path: RenderPath) -> bool:
 
 
 def frame_path(frame_meta: dict[str, str], project_default: RenderPath) -> RenderPath:
-    """Per-frame override via `visual_type:`, else the project default."""
-    value = (frame_meta.get("visual_type") or frame_meta.get("visualtype") or "").strip().lower()
-    if value in _FRAME_T2V:
-        return "t2v"
-    if value in _FRAME_HTML:
-        return "html"
-    return "t2v" if project_default == "t2v" else "html"
+    """Per-frame override via `render:` on the frame, else the project default.
+
+    Uses the same `html | t2v` vocabulary as the project-level `render:` in
+    BRIEF.md — one word, one meaning, at both levels. An unrecognised or
+    missing value falls back to the project default rather than being read as
+    an implicit choice.
+    """
+    value = (frame_meta.get("render") or frame_meta.get("render_path") or "").strip().lower()
+    if value in VALID:
+        return value  # type: ignore[return-value]
+    return project_default
 
 
 def _frontmatter(path: Path) -> str:

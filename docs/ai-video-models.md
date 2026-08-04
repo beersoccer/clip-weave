@@ -9,9 +9,11 @@
 | `ali` | `http://aigateway.t1.test.noahgrouptest.com/alivideo` | 阿里百炼 DashScope 异步 video-synthesis | `wan2.5-t2v-preview` | ✅ 480p/5s 约 104s 出片 |
 | `vertex` | `http://aigateway.t1.test.noahgrouptest.sg/vertexvideo` | Vertex AI `predictLongRunning` | `veo-3.1-generate-001` | ⚠️ 路由与鉴权已通，缺 GCP project |
 
-网关只监听 **http**（https 会 TLS 握手失败），且三条路由共用同一把网关 key——
-代码按 `<PROVIDER>_VIDEO_API_KEY` → `AI_GATEWAY_API_KEY` → `GEMINI_API_KEY` 依次回退，
-所以现有 `.env` 不改也能直接用。
+网关只监听 **http**（https 会 TLS 握手失败）。三个 provider 各自有一组
+`*_BASE_URL` / `*_API_KEY` / `*_MODEL`；`*_API_KEY` 是可选的——代码按
+`<PROVIDER>_VIDEO_API_KEY` → `AI_GATEWAY_API_KEY` 依次回退，网关给三条路由发的
+是同一把 key，所以设一次 `AI_GATEWAY_API_KEY` 就够，某个 provider 需要不同的
+key 时再单独填它自己的 `*_API_KEY`（会优先于共享 key）。
 
 ## 验证
 
@@ -207,6 +209,57 @@ vertex_project: noah-ai-xxx  # GCP 项目 ID,Vertex 用
 
 排查小坑:被复用的 shell 里如果早先 `export` 过 `VERTEX_VIDEO_LOCATION`,
 `load_dotenv()` 默认**不覆盖**已存在的环境变量,`.env` 的改动会被静默忽略。
+
+### 换成运维给的真实资源路径格式复测(2026-08-03)
+
+运维提供了明确的调用方式:
+
+```
+POST https://us-central1-aiplatform.googleapis.com/v1/projects/PROJECT_ID
+  /locations/us-central1/publishers/google/models/veo-3.1-generate-001
+  :predictLongRunning
+```
+
+这是 Vertex AI 的**原生** REST 资源路径(project 在路径里,不是网关此前的精简形态
+`publishers/google/models/{model}`)。代码已按此更新 —— `VERTEX_VIDEO_PROJECT` 现在
+是必填项,`_model_path` 缺 project 时直接报错,不再有"网关精简路径省略 project"的
+分支。
+
+两件事先分开验证:
+
+1. **直连真实 Google host,用网关的 key** —— `401 UNAUTHENTICATED /
+   ACCESS_TOKEN_TYPE_UNSUPPORTED`。Google 自己的 API 只认 OAuth2 access token /
+   登录 cookie,网关发的 Bearer key 对 Google 而言不是合法凭证。**结论:这个真实
+   路径格式必须走网关代理,不能让代码直接打 `*.aiplatform.googleapis.com`。**
+
+2. **同一路径,换成网关 `/vertexvideo` 前缀代理,仍用网关 key** —— 路由和鉴权都通
+   (`gemini-2.5-flash:generateContent` 走同一路径规则返回 200),但 veo-3.1 系列
+   请求依旧 404 `Publisher model ... was not found or your project does not have
+   access to it`。试过 `us-central1` / `global` 两个 location,API 版本
+   `v1` / `v1beta1` 都试过,结论不变。`.com` 域的网关 host 上这条路由完全不存在
+   (连接层面直接 404,不是 Google 的错误体),只有 `.sg` 域的 `/vertexvideo`
+   路由能打通到 Google 侧。
+
+所以运维说的"已开通资源"从这条链路验证还没有生效,或者开通的 project/region 组合
+与这里验证的 `ai-manger-dept` + `us-central1` 不一致 —— 需要请运维用完全相同的
+project id + region + 模型名核实一遍,而不是继续在代码侧排查。路径格式本身已经是
+按运维给的方式实现,这部分不需要再变。
+
+### asia-southeast1 + 完整生成请求复测(2026-08-03,第二轮)
+
+按运维给的确切参数(`project=ai-manger-dept`, `model=veo-3.1-generate-001`)分别用
+`location=asia-southeast1` 和 `location=us-central1` 复测,**两个 location 结果一致**:
+
+- 用 `VideoModel.submit()` 发**完整合法的生成请求**(非探测用的非法 `durationSeconds`),
+  排除"探测请求触发误判"的可能性 —— 依旧 404
+  `Publisher model ... was not found or your project does not have access to it`。
+- 同一 project、同一路径规则,`asia-southeast1` 下的
+  `gemini-2.5-flash:generateContent` 仍是 200,路由和鉴权没有问题。
+
+结论不变:路由 / 鉴权 / project / 路径格式全部确认正确,唯一卡住的是 Google 侧对
+`ai-manger-dept` 这个 project 的 veo-3.1-generate-001 模型访问权限 —— 这需要运维
+在 Google Cloud 侧核实该 project 的 Vertex AI Model Garden 是否真的已经对
+veo-3.1(-generate-001)开通,而不是仅仅确认了网关路由能转发到这个模型名。
 换新 shell 或 `env -u VERTEX_VIDEO_LOCATION …` 再跑。
 
 ## T2V 提示词:复用 HF 产出物,不重新分析
@@ -241,7 +294,10 @@ uv run python -m clip_weave gen-video videos/xxx/STORYBOARD.md --provider doubao
 | reference | 帧的 `focal:` / `asset_candidates`(Asset Matcher 已有结论,不重跑) |
 
 HF 的动效实现词汇(`gsap-effects`、`spring-pop-entrance`、反引号里的类名)会被剥掉。
-以图文/数据为主的帧会被标 `needs_review: true` —— 视频模型渲染文字不可靠,这类帧建议
+以图文/数据为主的帧(卡片弹入、计数器、排版类)先经同一个 LLM 网关(`ROUTER_*` →
+`HTML_GEN_*` → `VIDEO_ANALYSIS_*`)语义改写成可拍摄镜头 —— 保留画面主旨,把图形机制换成
+镜头/光线/材质描述,绝不提卡片/文字/UI。改写成功的帧在 `T2V-PROMPTS.md` 标一行改写说明,
+建议生成前过一遍;只有网关未配置或调用失败才退回旧行为,标 `needs_review: true` 并建议
 留在 HTML 路径。
 
 参考(内容均已改写以符合授权要求):

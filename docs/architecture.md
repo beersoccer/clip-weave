@@ -76,16 +76,17 @@ clip-weave 补位（HF 缺失或用户体验不足）：
    → renders/output.mp4
        │
        ▼
-⑦ 渲染路径决策（BRIEF.md 的 render: html | t2v | mixed）
+⑦ 渲染路径决策（BRIEF.md 的 render: html | t2v）
    render: html → 步骤 ④⑤⑥ 就是终点
-   render: t2v / mixed → STORYBOARD.md → T2V-PROMPTS.md（用户可编辑）→ 文生视频模型 → FFmpeg 合流
+   render: t2v → STORYBOARD.md → T2V-PROMPTS.md（用户可编辑）→ 文生视频模型 → FFmpeg 合流
 ```
 
 **关键：** 步骤 ①②③⑤ 是 clip-weave 独有价值，④⑥完全委托 HF。
 
-**渲染路径是项目级决策，不是分镜级。** 逐帧判断走 HTML 还是 T2V 对用户过于复杂，因此在
-项目之初问一次、写进 `BRIEF.md` 的 `render:` 并持久化（`run --render ask` 默认行为）。
-只有 `render: mixed` 才需要逐帧标注（`visual_type: motion | live_action`），指出个别镜头。
+**渲染路径的项目级默认是主决策，不逐帧问。** 逐帧判断走 HTML 还是 T2V 对用户过于复杂，因此在
+项目之初问一次、写进 `BRIEF.md` 的 `render:`（只有 `html` | `t2v` 两个值，没有 `mixed`）并
+持久化（`run --render ask` 默认行为）。混排通过逐帧 `render:` 覆盖表达——覆盖用的是与项目级
+相同的词表，不是单独的 `visual_type` 词表。
 
 | | HTML 路径（④⑤⑥）| T2V 路径（⑦）|
 |---|---|---|
@@ -96,7 +97,7 @@ clip-weave 补位（HF 缺失或用户体验不足）：
 | 不适合 | 电影级写实、真人出镜、复杂物理 | 精确文字排版、品牌色严格一致、数据准确性 |
 | 默认 | ✅ 确定性、零推理费用 | 需显式选择 |
 
-> ⚠️ `render: mixed` 混排必须在 **FFmpeg 层合流**，不要把 T2V 生成的片段当 `<video>`
+> ⚠️ 逐帧 `render:` 覆盖混排的项目必须在 **FFmpeg 层合流**，不要把 T2V 生成的片段当 `<video>`
 > 塞进 HTML 合成。原因：Chrome 无法同时 seek 多个 `<video>`（解码器耗尽），视频密集
 > 合成会退化为单 worker 甚至超时。详见 `hyperframes-analysis.md` § 2.6 / § 9.6，
 > 以及 `skills/clip-weave/references/t2v-guide.md`。
@@ -365,8 +366,9 @@ clip-weave/
 │       ├── project_factory.py          # BRIEF.md + capture/ + frame.md 组装
 │       ├── delegator.py                # 调 Claude Code + skill
 │       ├── storyboard.py               # STORYBOARD.md 解析 + 基础提示词回落
-│       ├── render_path.py              # 项目级 render: html|t2v|mixed（默认 HTML）
-│       ├── t2v_prompt.py               # 生成用户可编辑的 T2V-PROMPTS.md
+│       ├── render_path.py              # 项目级 render: html|t2v（默认 HTML）+ 逐帧 render: 覆盖
+│       ├── llm_gateway.py              # 共享的 chat-completion 网关调用（OpenAI/Anthropic 双协议重试）
+│       ├── t2v_prompt.py               # 生成用户可编辑的 T2V-PROMPTS.md，图文帧经 LLM 改写为可拍摄镜头
 │       └── video_pipeline.py           # 逐帧生成 + manifest + FFmpeg 合流
 ├── skills/
 │   └── clip-weave/
@@ -433,15 +435,16 @@ clip-weave 只依赖以下稳定接口，与 HF 内部实现完全解耦：
 | **P1** | 解决 lint 痛点 | 按 HF 源码核对后收缩为单规则装配前预检；增量 check 及其覆盖率策略 | ✅ 完成（三条规则经核对删除，见 § 3.1）|
 | **P2** | 提升素材利用率 | Asset Matcher（Vision 描述增强 + Embedding/BM25 top-K 检索 + 质量下限过滤）；capture 噪声过滤 | ✅ 完成 |
 | **P3** | **T2V 路径** | STORYBOARD.md 解析；三家 provider；逐帧生成 + manifest；FFmpeg 合流；项目级 `render:` 路径选择；用户可编辑的 `T2V-PROMPTS.md` | ✅ 代码完成，待真实网关实测 |
-| **P4** | 两条路径混排 | `render: mixed` 项目内动效镜头（HTML 路径）与写实镜头（T2V 路径）并存，FFmpeg 层合流 | 🔲 P3 实测后 |
+| **P4** | 两条路径混排 | 逐帧 `render:` 覆盖项目默认，动效镜头（HTML 路径）与写实镜头（T2V 路径）并存，FFmpeg 层合流 | ✅ 完成 |
 
-**当前状态**：P0–P3 代码全部交付，257 个测试通过。P3 待真实网关实测；P4 混排待 P3
-实测后设计。
+**当前状态**：P0–P4 代码全部交付。P3 待真实网关实测。
 
 **渲染路径是项目级决策。** 逐帧判断走 HTML 还是 T2V 对用户过于复杂，因此改为在项目之初
-问一次、写进 `BRIEF.md` 的 `render:` 并持久化。`mixed` 时才用帧上的
-`visual_type: motion | live_action` 指出个别镜头。默认 HTML —— 确定性、零推理费用，
-且是唯一能准确渲染字体、品牌色与数据的路径。
+问一次、写进 `BRIEF.md` 的 `render:` 并持久化（只有 `html` | `t2v`，没有 `mixed`）。
+需要混排时，个别帧上写同名的 `render:` 覆盖项目默认——同一套词表，不是单独的
+`visual_type` 词表。默认 HTML —— 确定性、零推理费用，且是唯一能准确渲染字体、品牌色与
+数据的路径。图文/数据意图的帧在改用 T2V 时会先经 LLM 网关改写成可拍摄镜头，改写失败才
+退回 `needs_review` 标记（见 `t2v_prompt.py`）。
 
 ---
 

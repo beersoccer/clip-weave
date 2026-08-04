@@ -16,8 +16,9 @@ Usage:
     uv run python scripts/verify_video_gateway.py --provider doubao
     uv run python scripts/verify_video_gateway.py            # all three, real
 
-The API key is read from <PROVIDER>_VIDEO_API_KEY, else AI_GATEWAY_API_KEY,
-else GEMINI_API_KEY — the gateway issues one key for every route.
+The API key is read from <PROVIDER>_VIDEO_API_KEY, else AI_GATEWAY_API_KEY —
+the gateway issues one key for every route, so AI_GATEWAY_API_KEY alone is
+enough; set a provider's own *_API_KEY only when it needs a different key.
 """
 
 from __future__ import annotations
@@ -62,27 +63,29 @@ def probe(name: str) -> tuple[str, str]:
     except VideoGenError as exc:
         return BAD, str(exc)
 
-    if name == "doubao":
-        method, url, body, headers = "POST", model._tasks_url, {}, {}
-    elif name == "ali":
-        method, url, body = "POST", model._submit_url, {}
-        headers = {"X-DashScope-Async": "enable"}
-    else:
-        # A real prompt is needed for Vertex to even look the model up ({"instances": []}
-        # short-circuits to "Empty instances"), but durationSeconds=3 is illegal for
-        # every Veo model, so a reachable model rejects it instead of starting a job.
-        method, url, headers = "POST", model._url("predictLongRunning"), {}
-        body = {"instances": [{"prompt": "probe"}], "parameters": {"durationSeconds": 3}}
-
+    url = "(not built yet)"
     try:
+        if name == "doubao":
+            method, url, body, headers = "POST", model._tasks_url, {}, {}
+        elif name == "ali":
+            method, url, body = "POST", model._submit_url, {}
+            headers = {"X-DashScope-Async": "enable"}
+        else:
+            # A real prompt is needed for Vertex to even look the model up
+            # ({"instances": []} short-circuits to "Empty instances"), but
+            # durationSeconds=3 is illegal for every Veo model, so a reachable
+            # model rejects it instead of starting a job. `_url()` itself raises
+            # if VERTEX_VIDEO_PROJECT is unset — the resource path requires it.
+            method, url, headers = "POST", model._url("predictLongRunning"), {}
+            body = {"instances": [{"prompt": "probe"}], "parameters": {"durationSeconds": 3}}
         data = model._request(method, url, json=body, headers=headers)
     except VideoGenError as exc:
         msg = str(exc)
         if "RESOURCE_PROJECT_INVALID" in msg or "CONSUMER_INVALID" in msg:
             return WARN, (
-                f"{url} reaches Vertex PredictLongRunning, but the resource path has no valid "
-                "project — set VERTEX_VIDEO_PROJECT + VERTEX_VIDEO_LOCATION (or "
-                "VERTEX_VIDEO_MODEL_PATH) to the GCP project behind the gateway"
+                f"{url} reaches Vertex PredictLongRunning, but the project in the path is not "
+                "a valid billing identity — check VERTEX_VIDEO_PROJECT + VERTEX_VIDEO_LOCATION "
+                "(or VERTEX_VIDEO_MODEL_PATH) against the GCP project behind the gateway"
             )
         if "Publisher model" in msg and "not found" in msg:
             return BAD, (
@@ -185,20 +188,19 @@ def list_models(name: str) -> None:
             print(f"  {model_id:36} config error: {exc}")
             continue
 
-        if name == "doubao":
-            url, body, headers = client._tasks_url, {
-                "model": model_id,
-                "content": [{"type": "text", "text": "probe"}],
-                "duration": 1,
-            }, {}
-        elif name == "ali":
-            url, body = client._submit_url, {"model": model_id, "input": {}}
-            headers = {"X-DashScope-Async": "enable"}
-        else:
-            url, headers = client._url("predictLongRunning"), {}
-            body = {"instances": [{"prompt": "probe"}], "parameters": {"durationSeconds": 3}}
-
         try:
+            if name == "doubao":
+                url, body, headers = client._tasks_url, {
+                    "model": model_id,
+                    "content": [{"type": "text", "text": "probe"}],
+                    "duration": 1,
+                }, {}
+            elif name == "ali":
+                url, body = client._submit_url, {"model": model_id, "input": {}}
+                headers = {"X-DashScope-Async": "enable"}
+            else:
+                url, headers = client._url("predictLongRunning"), {}
+                body = {"instances": [{"prompt": "probe"}], "parameters": {"durationSeconds": 3}}
             data = client._request("POST", url, json=body, headers=headers)
         except VideoGenError as exc:
             msg = str(exc)

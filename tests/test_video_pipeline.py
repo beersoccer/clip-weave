@@ -196,6 +196,56 @@ def test_elapsed_seconds_is_recorded_on_success(tmp_path):
     assert all(r.elapsed_seconds is not None for r in results)
 
 
+# ── flaky report sink (regression) ───────────────────────────────────────────
+#
+# `report` is a progress side-channel (CLI echo / pty write) — a failure there
+# must never relabel a successful clip as failed, and must never stop the
+# pipeline from writing manifest.json for the remaining frames.
+
+def test_report_failure_does_not_fail_a_successful_download(tmp_path):
+    def flaky_report(msg):
+        if msg.startswith("frame 1 done"):
+            raise OSError("broken pipe")
+
+    model = FakeModel()
+    results = _run(tmp_path, model=model, report=flaky_report)
+
+    assert [r.state for r in results] == ["succeeded", "succeeded"]
+    out = tmp_path / "renders" / "ai-clips" / "doubao"
+    assert (out / "01-开场.mp4").exists()
+
+
+def test_report_failure_does_not_block_manifest_write(tmp_path):
+    def always_raises(_msg):
+        raise BrokenPipeError("pty gone")
+
+    _run(tmp_path, model=FakeModel(), report=always_raises)
+
+    manifest = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    assert manifest.exists()
+    data = json.loads(manifest.read_text())
+    assert [c["state"] for c in data["clips"]] == ["succeeded", "succeeded"]
+
+
+def test_concat_report_failure_still_returns_the_stitched_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("clip_weave.core.video_pipeline.shutil.which", lambda _: "/usr/bin/ffmpeg")
+
+    class Done:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr("clip_weave.core.video_pipeline.subprocess.run", lambda *a, **k: Done())
+    (tmp_path / "01.mp4").write_bytes(b"x")
+    clip = ClipResult(index=1, title="a", prompt="p", duration=5,
+                      video_path=str(tmp_path / "01.mp4"))
+
+    def always_raises(_msg):
+        raise OSError("broken pipe")
+
+    dest = concat_clips([clip], tmp_path / "full.mp4", report=always_raises)
+    assert dest == tmp_path / "full.mp4"
+
+
 # ── T2V-PROMPTS.md overrides ──────────────────────────────────────────────────
 #
 # These four dicts are how a user-edited T2V-PROMPTS.md reaches the provider.
@@ -358,7 +408,7 @@ def test_concat_surfaces_ffmpeg_failure(tmp_path, monkeypatch):
         concat_clips([clip], tmp_path / "full.mp4", report=lambda _: None)
 
 
-# ── render: mixed frame filtering ─────────────────────────────────────────────
+# ── per-frame render: overrides ───────────────────────────────────────────────
 
 MIXED_STORYBOARD = """---
 format: 1920x1080
@@ -367,12 +417,12 @@ message: "test message"
 
 ## Frame 1 — 图表
 - scene: 数据柱状图
-- visual_type: motion
+- render: html
 - duration: 5s
 
 ## Frame 2 — 实拍
 - scene: 城市夜景
-- visual_type: live_action
+- render: t2v
 - duration: 5s
 
 ## Frame 3 — 未标注
@@ -381,61 +431,60 @@ message: "test message"
 """
 
 
-def test_mixed_render_default_skips_html_routed_frames(tmp_path):
-    """render_default='mixed' + visual_type: motion means frame 1 gets no T2V clip.
-
-    Frame 3 has no visual_type at all. Per frame_path()'s own contract (see
-    test_unannotated_frame_defaults_to_t2v_under_mixed below), an unannotated
-    frame under a "mixed" project resolves to "html" and is excluded too — only
-    frame 2 (visual_type: live_action) survives.
+def test_render_default_html_skips_frames_still_routed_to_html(tmp_path):
+    """render_default='html' + frame 2's own `render: t2v` override means only
+    frame 2 gets a T2V clip. Frame 3 has no override at all and follows the
+    project default (html), so it is excluded too — only frame 2 survives.
     """
     model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed")
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html")
 
     assert [r.index for r in results] == [2]
     assert len(model.submitted) == 1
 
 
-def test_mixed_render_default_generates_live_action_frames(tmp_path):
+def test_render_default_html_generates_the_t2v_overridden_frame(tmp_path):
     model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed")
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html")
 
     by_index = {r.index: r for r in results}
     assert by_index[2].state == "succeeded"
-    assert "城市夜景" in model.submitted[0].prompt or "城市夜景" in model.submitted[1].prompt
+    assert "城市夜景" in model.submitted[0].prompt
 
 
-def test_unannotated_frame_defaults_to_t2v_under_mixed():
-    """frame_path({}, "mixed") == "html" per render_path.py's own contract — confirm
-    generate_clips respects that: an unannotated frame in a mixed project is
-    treated as HTML-routed (excluded), matching frame_path's documented default."""
+def test_unannotated_frame_follows_the_html_project_default():
+    """frame_path({}, "html") == "html" per render_path.py's own contract — confirm
+    generate_clips respects that: an unannotated frame under an html-default
+    project is treated as HTML-routed (excluded)."""
     from clip_weave.core.render_path import frame_path
 
-    assert frame_path({}, "mixed") == "html"
+    assert frame_path({}, "html") == "html"
 
 
 def test_render_default_none_generates_every_frame_unchanged(tmp_path):
     """No render_default (the pre-existing behavior) must be untouched: every
-    frame gets a clip regardless of visual_type annotation."""
+    frame gets a clip regardless of its `render:` override."""
     model = FakeModel()
     results = _run(tmp_path, MIXED_STORYBOARD, model=model)  # no render_default passed
 
     assert [r.index for r in results] == [1, 2, 3]
 
 
-def test_render_default_t2v_generates_every_frame(tmp_path):
-    """render_default='t2v' (not 'mixed') must also generate every frame — the
-    per-frame filter only applies to 'mixed' projects."""
+def test_render_default_t2v_generates_every_frame_when_none_opt_out(tmp_path):
+    """render_default='t2v' with no frame opting into 'html' generates every
+    frame — the per-frame filter only excludes frames whose effective path
+    resolves to 'html'."""
     model = FakeModel()
     results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="t2v")
 
-    assert [r.index for r in results] == [1, 2, 3]
+    # frame 1 opts into html under a t2v-default project and is excluded.
+    assert [r.index for r in results] == [2, 3]
 
 
 def test_explicit_frames_still_overrides_mixed_filtering(tmp_path):
     """--frames stays an unconditional override, same as it already is for
-    plain routing — mixed filtering must not fight an explicit frame list."""
+    plain routing — the per-frame filter must not fight an explicit frame list."""
     model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="mixed", frames=[1])
+    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html", frames=[1])
 
     assert [r.index for r in results] == [1]

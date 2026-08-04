@@ -108,9 +108,113 @@ def test_voiceover_excluded_by_default(tmp_path):
     assert "蛟龙底盘" in build_doc(sb, include_voiceover=True).specs[0].audio
 
 
-def test_graphics_heavy_frame_is_flagged(tmp_path):
+def test_graphics_heavy_frame_is_flagged_without_a_gateway(tmp_path):
+    """No ROUTER_*/HTML_GEN_*/VIDEO_ANALYSIS_* configured (the `offline_by_default`
+    autouse fixture clears them) — the rewrite is skipped and the frame is
+    flagged needs_review instead, same as before the rewrite feature existed."""
     sb = parse_storyboard(_project(tmp_path))
-    assert build_doc(sb).specs[1].needs_review is True
+    spec = build_doc(sb).specs[1]
+    assert spec.needs_review is True
+    assert "no LLM gateway" in spec.notes
+
+
+# ── LLM scene rewrite for graphics-intent frames ──────────────────────────────
+
+def test_graphics_intent_scene_is_rewritten_via_gateway(tmp_path, monkeypatch):
+    """A card/counter/typography scene line gets rewritten into a filmable shot
+    when a gateway is configured, instead of being flagged needs_review."""
+    monkeypatch.setenv("ROUTER_BASE_URL", "http://gateway.test/v1")
+    monkeypatch.setenv("ROUTER_API_KEY", "k")
+    monkeypatch.setenv("ROUTER_MODEL", "test-model")
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": "低角度环绕底盘特写，金属反光随镜头运动流动"}}
+                ]
+            }
+
+    calls = []
+
+    def _post(url, **kwargs):
+        calls.append((url, kwargs))
+        return _Resp()
+
+    import requests
+
+    monkeypatch.setattr(requests, "post", _post)
+
+    sb = parse_storyboard(_project(tmp_path))
+    spec = build_doc(sb).specs[1]  # Frame 2 — "logo 拼合，价格大字滑入"
+
+    assert spec.needs_review is False
+    assert "rewritten" in spec.notes
+    assert "低角度环绕底盘特写" in spec.scene
+    assert "logo" not in spec.scene.lower()
+    url, kwargs = calls[0]
+    assert url == "http://gateway.test/v1/chat/completions"
+    assert "价格大字滑入" in kwargs["json"]["messages"][1]["content"]
+
+
+def test_rewrite_failure_falls_back_to_needs_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROUTER_BASE_URL", "http://gateway.test/v1")
+    monkeypatch.setenv("ROUTER_API_KEY", "k")
+    monkeypatch.setenv("ROUTER_MODEL", "test-model")
+
+    import requests
+
+    def _boom(*a, **kw):
+        raise requests.RequestException("connection refused")
+
+    monkeypatch.setattr(requests, "post", _boom)
+
+    sb = parse_storyboard(_project(tmp_path))
+    spec = build_doc(sb).specs[1]
+
+    assert spec.needs_review is True
+    assert "logo" in spec.scene.lower() or "价格" in spec.scene
+
+
+def test_non_graphics_frame_is_never_sent_to_the_rewrite_gateway(tmp_path, monkeypatch):
+    """Frame 1's scene ("底盘俯视图...") has no card/counter/typography hint, so its
+    text must never appear in a gateway call — only frame 2's graphics-intent
+    scene should be sent for rewriting."""
+    monkeypatch.setenv("ROUTER_BASE_URL", "http://gateway.test/v1")
+    monkeypatch.setenv("ROUTER_API_KEY", "k")
+    monkeypatch.setenv("ROUTER_MODEL", "test-model")
+
+    sent_user_messages = []
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "改写后的镜头"}}]}
+
+    def _post(url, **kwargs):
+        sent_user_messages.append(kwargs["json"]["messages"][1]["content"])
+        return _Resp()
+
+    import requests
+
+    monkeypatch.setattr(requests, "post", _post)
+
+    sb = parse_storyboard(_project(tmp_path))
+    specs = build_doc(sb).specs
+
+    assert specs[0].needs_review is False  # frame 1 — no filmable-hint tokens
+    assert len(sent_user_messages) == 1     # only frame 2 (graphics-intent) triggered a call
+    assert "底盘俯视图" not in sent_user_messages[0]
+    assert "价格大字滑入" in sent_user_messages[0]
 
 
 # ── T2V-PROMPTS.md round trip ────────────────────────────────────────────────
