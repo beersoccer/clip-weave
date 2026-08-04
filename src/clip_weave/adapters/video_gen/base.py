@@ -54,14 +54,13 @@ class ProviderConfig:
         extra_keys: tuple[str, ...] = (),
     ) -> "ProviderConfig":
         base = os.getenv(f"{prefix}_BASE_URL", default_base_url).strip().rstrip("/")
-        # The company gateway issues one key for every route, so fall back to the
-        # shared key rather than forcing three copies of it into .env.
-        key = (
-            os.getenv(f"{prefix}_API_KEY")
-            or os.getenv("AI_GATEWAY_API_KEY")
-            or os.getenv("GEMINI_API_KEY")
-            or ""
-        ).strip()
+        # Every provider has its own *_API_KEY slot. The company gateway issues one
+        # key for every video route (including Vertex — it is proxied through the
+        # same gateway, just with a different upstream path), so AI_GATEWAY_API_KEY
+        # is a convenience fallback when a provider's own key is not set: configure
+        # just that one variable and every provider works. A provider's own key,
+        # when set, always wins.
+        key = (os.getenv(f"{prefix}_API_KEY") or os.getenv("AI_GATEWAY_API_KEY") or "").strip()
         model = os.getenv(f"{prefix}_MODEL", default_model).strip()
         extra = {k: os.getenv(f"{prefix}_{k}", "").strip() for k in extra_keys}
         return cls(name=name, base_url=base, api_key=key, model=model, extra=extra)

@@ -32,9 +32,9 @@ def cli():
 @click.option("--workflow", default=None, help="Force a specific HF workflow")
 @click.option(
     "--render",
-    type=click.Choice(["html", "t2v", "mixed", "ask"]),
+    type=click.Choice(["html", "t2v", "ask"]),
     default="ask",
-    help="Renderer: html (HF compositions) | t2v (video models) | mixed | ask (default)",
+    help="Renderer: html (HF compositions) | t2v (video models) | ask (default)",
 )
 def run_cmd(url, message, project, videos_dir, length, workflow, render):
     """Route a video request and prepare the HF project for delegation."""
@@ -74,7 +74,7 @@ def _settle_render_path(project_dir: Path, choice: str) -> str:
         "\n渲染路径未指定。\n"
         "  html  HF 合成（默认）— 精确文字/品牌色/数据图表，可复现，无推理费用\n"
         "  t2v   视频大模型     — 写实镜头、真实光影，按秒计费，有随机性\n"
-        "  mixed 两者混排       — 图文帧走 html，实拍帧走 t2v（帧上写 visual_type）"
+        "  两者混排：项目默认选一个，个别帧在 STORYBOARD.md 上写 `render: html`/`render: t2v` 覆盖"
     )
     if not sys.stdin.isatty():
         click.echo(f"非交互环境，按默认 {rp.DEFAULT} 处理（用 --render 显式指定）")
@@ -86,7 +86,7 @@ def _settle_render_path(project_dir: Path, choice: str) -> str:
     )
     rp.persist(project_dir, picked)
     click.echo(f"已写入 BRIEF.md：render: {picked}（下次不再询问，改这一行即可切换）")
-    if picked in ("t2v", "mixed"):
+    if picked == "t2v":
         click.echo(
             f"下一步：uv run python -m clip_weave gen-video {project_dir}/STORYBOARD.md "
             "--provider doubao --dry-run"
@@ -268,7 +268,7 @@ def gen_video_cmd(
     if chosen == "html" and not yes and not prompts_only:
         click.echo(f"BRIEF.md 指定 render: html（{source}）— 该项目的画面本应由 HF 合成。")
         if not dry_run and sys.stdin.isatty() and not click.confirm("仍然用 T2V 生成？", default=False):
-            click.echo("已取消。要长期切换：把 BRIEF.md 的 render: 改成 t2v 或 mixed。")
+            click.echo("已取消。要长期切换：把 BRIEF.md 的 render: 改成 t2v。")
             return
     elif chosen is None and not yes:
         click.echo("提示：BRIEF.md 未写 render:，本次按 t2v 执行。"
@@ -298,11 +298,17 @@ def gen_video_cmd(
                 "该文件已生成的提示词优先。用 --regenerate-prompts 从 STORYBOARD.md 重建"
                 "（会丢弃手工编辑），或直接编辑该文件。"
             )
+    rewritten = [s.index for s in doc.specs if "rewritten" in (s.notes or "")]
+    if rewritten:
+        click.echo(
+            f"  scene rewritten: frame {', '.join(map(str, rewritten))} 的图文意图已由 LLM "
+            "改写为可拍摄镜头 — 生成前建议过一遍"
+        )
     flagged = [s.index for s in doc.specs if s.needs_review]
     if flagged:
         click.echo(
-            f"  needs_review: frame {', '.join(map(str, flagged))} 以图文/数据为主，"
-            "视频模型渲染文字不可靠 — 建议这些帧留在 HTML 路径"
+            f"  needs_review: frame {', '.join(map(str, flagged))} 以图文/数据为主，未能自动"
+            "改写（未配置网关）— 视频模型渲染文字不可靠，建议这些帧留在 HTML 路径"
         )
     if prompts_only:
         click.echo("--prompts-only：未调用任何模型。编辑该文件后再跑一次即可生效。")

@@ -115,7 +115,7 @@ cp .env.example .env
 | Asset Matcher Vision | `VIDEO_ANALYSIS_BASE_URL/API_KEY/MODEL` | 未配置则跳过增强，用 capture 原始描述 |
 | Asset Matcher Embedding | `EMBEDDING_BASE_URL/API_KEY/MODEL` | 未配置则降级 BM25；与 Vision 完全独立 |
 | Intent 语义路由 | `ROUTER_*`（缺失回退 `HTML_GEN_*` → `VIDEO_ANALYSIS_*`）| 网关不可用时自动降级为关键词匹配 |
-| T2V provider | `DOUBAO_VIDEO_*` / `ALI_VIDEO_*` / `VERTEX_VIDEO_*` | 未设置 `*_API_KEY` 时回退共享的 `AI_GATEWAY_API_KEY` |
+| T2V provider | `DOUBAO_VIDEO_*` / `ALI_VIDEO_*` / `VERTEX_VIDEO_*` | 各自可配 `*_API_KEY`；未配则回退共享的 `AI_GATEWAY_API_KEY` |
 | HF capture | `GEMINI_API_KEY` / `GEMINI_BASE_URL` | HF 自己读取，非 clip-weave |
 
 ---
@@ -139,8 +139,9 @@ clip-weave/
 │       ├── project_factory.py      # HF 项目初始化（init / capture / 文件暂存）
 │       ├── delegator.py            # 委托指令生成
 │       ├── storyboard.py           # STORYBOARD.md 解析 + 基础提示词回落
-│       ├── render_path.py          # 项目级 render: html|t2v|mixed（默认 html）
-│       ├── t2v_prompt.py           # 生成用户可编辑的 T2V-PROMPTS.md
+│       ├── render_path.py          # 项目级 render: html|t2v（默认 html）+ 逐帧 render: 覆盖
+│       ├── llm_gateway.py          # 共享的 chat-completion 网关调用（含 OpenAI/Anthropic 双协议重试）
+│       ├── t2v_prompt.py           # 生成用户可编辑的 T2V-PROMPTS.md，图文帧经 LLM 改写为可拍摄镜头
 │       └── video_pipeline.py       # 逐帧生成 + manifest + FFmpeg 合流
 ├── skills/
 │   └── clip-weave/

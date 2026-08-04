@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from typing import Literal
+
+from clip_weave.core.llm_gateway import GatewayConfig, call_chat, resolve_gateway  # noqa: F401 - GatewayConfig re-exported for _gateway()'s return type
 
 logger = logging.getLogger(__name__)
 
@@ -98,23 +99,18 @@ class RouteDecision:
     reason: str
 
 
-def _gateway() -> tuple[str, str, str] | None:
-    """Return (base_url, api_key, model) from the first configured prefix."""
+_GATEWAY_PREFIXES: tuple[tuple[str, str], ...] = (
     # VIDEO_ANALYSIS_* first: on our gateway that route is OpenAI-compatible
     # (`/vertex/v1/chat/completions`), while HTML_GEN_* points at the Bedrock route,
     # which speaks Anthropic-native `/v1/messages` and 404s on `/chat/completions`.
-    for prefix, default_model in (
-        ("ROUTER", ""),
-        ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
-        ("HTML_GEN", ""),
-    ):
-        base = (os.getenv(f"{prefix}_BASE_URL") or "").strip()
-        key = (os.getenv(f"{prefix}_API_KEY") or "").strip()
-        if base and key:
-            model = (os.getenv(f"{prefix}_MODEL") or default_model).strip()
-            if model:
-                return base.rstrip("/"), key, model
-    return None
+    ("ROUTER", ""),
+    ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
+    ("HTML_GEN", ""),
+)
+
+
+def _gateway() -> GatewayConfig | None:
+    return resolve_gateway(_GATEWAY_PREFIXES)
 
 
 def classify(
@@ -134,36 +130,20 @@ def classify(
         )
         return RouteDecision(fallback, "keyword", 0.0, "no LLM gateway configured")
 
-    base_url, api_key, model = gw
     taxonomy = "\n".join(f"- {name}: {desc}" for name, desc in WORKFLOW_TAXONOMY.items())
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT.format(taxonomy=taxonomy)},
-            {
-                "role": "user",
-                "content": f"input_source: {source_type}\nrequest: {user_input.strip()[:2000]}",
-            },
-        ],
-        # Generous cap: reasoning models spend hidden tokens before the JSON answer
-        # (gemini-2.5-flash measured ~490 reasoning tokens for this prompt), and a
-        # truncated reply would silently degrade to keyword routing.
-        "max_tokens": 1500,
-        "temperature": 0,
-    }
+    user = f"input_source: {source_type}\nrequest: {user_input.strip()[:2000]}"
 
-    protocol = (os.getenv("ROUTER_PROTOCOL") or "auto").strip().lower()
     try:
-        if protocol == "anthropic":
-            content = _call_anthropic(base_url, api_key, payload, timeout)
-        else:
-            try:
-                content = _call_openai(base_url, api_key, payload, timeout)
-            except _NotOpenAICompatible:
-                # Some gateway routes are Anthropic-native (`/v1/messages`) and 404 on
-                # `/chat/completions`. Retry in that dialect before giving up.
-                logger.info("%s is not OpenAI-compatible — retrying Anthropic /v1/messages", base_url)
-                content = _call_anthropic(base_url, api_key, payload, timeout)
+        content = call_chat(
+            gw,
+            system=_SYSTEM_PROMPT.format(taxonomy=taxonomy),
+            user=user,
+            # Generous cap: reasoning models spend hidden tokens before the JSON answer
+            # (gemini-2.5-flash measured ~490 reasoning tokens for this prompt), and a
+            # truncated reply would silently degrade to keyword routing.
+            max_tokens=1500,
+            timeout=timeout,
+        )
     except Exception as exc:  # noqa: BLE001 - network/shape errors all degrade the same way
         logger.warning("Semantic routing failed (%s) — falling back to keyword routing", exc)
         return RouteDecision(fallback, "keyword-fallback", 0.0, f"LLM unavailable: {exc}"[:120])
@@ -178,57 +158,6 @@ def classify(
 
     workflow, confidence, reason = parsed
     return RouteDecision(workflow, "semantic", confidence, reason)
-
-
-class _NotOpenAICompatible(Exception):
-    """The route exists but does not speak OpenAI chat/completions."""
-
-
-def _call_openai(base_url: str, api_key: str, payload: dict, timeout: int) -> str:
-    import requests
-
-    resp = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=timeout,
-    )
-    if resp.status_code == 404:
-        raise _NotOpenAICompatible(f"{base_url}/chat/completions → 404")
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
-
-
-def _call_anthropic(base_url: str, api_key: str, payload: dict, timeout: int) -> str:
-    """Anthropic Messages dialect: `system` is a top-level field, content is a list."""
-    import requests
-
-    messages = payload["messages"]
-    system = next((m["content"] for m in messages if m["role"] == "system"), "")
-    body = {
-        "model": payload["model"],
-        "max_tokens": payload.get("max_tokens", 1024),
-        "temperature": payload.get("temperature", 0),
-        "system": system,
-        "messages": [{"role": m["role"], "content": m["content"]}
-                     for m in messages if m["role"] != "system"],
-    }
-    # Avoid `/v1/v1/messages` when the configured base already carries the version.
-    root = re.sub(r"/v1$", "", base_url)
-    resp = requests.post(
-        f"{root}/v1/messages",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        json=body,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    blocks = resp.json().get("content") or []
-    return "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
 
 
 def _parse(content: str) -> tuple[str, float, str] | None:

@@ -1,22 +1,34 @@
 """Google Veo — Vertex AI `predictLongRunning` protocol.
 
 Upstream reference: POST
-`{base}/v1/{model_path}:predictLongRunning` with
-`{"instances": [{"prompt": …}], "parameters": {"aspectRatio", "durationSeconds",
-"resolution", "sampleCount", "generateAudio", "negativePrompt"}}` returns
-`{"name": "…/operations/…"}`; POST `{base}/v1/{model_path}:fetchPredictOperation`
-with `{"operationName": …}` returns the operation, and once `done` is true the
-videos arrive under `response.videos[]` as `gcsUri` or `bytesBase64Encoded`.
+`{base}/v1/projects/{project}/locations/{location}/publishers/google/models/
+{model}:predictLongRunning` with `{"instances": [{"prompt": …}], "parameters":
+{"aspectRatio", "durationSeconds", "resolution", "sampleCount", "generateAudio",
+"negativePrompt"}}` returns `{"name": "…/operations/…"}`; POST the same
+resource path with `:fetchPredictOperation` and `{"operationName": …}` returns
+the operation, and once `done` is true the videos arrive under
+`response.videos[]` as `gcsUri` or `bytesBase64Encoded`.
 Docs: https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.endpoints/predictLongRunning
-and a gateway-shaped worked example at
-https://docs.zenmux.ai/api/vertexai/generate-videos.html
 (content rephrased for compliance with licensing restrictions.)
 
-`model_path` differs between raw Vertex and a gateway:
-  * raw Vertex — `projects/{project}/locations/{loc}/publishers/google/models/{model}`
-  * gateway     — `publishers/google/models/{model}`   ← default here
-Set `VERTEX_VIDEO_MODEL_PATH` to override it wholesale, or
-`VERTEX_VIDEO_PROJECT` + `VERTEX_VIDEO_LOCATION` to build the raw Vertex form.
+Confirmed against the real Vertex AI host — this is what the raw Google API
+requires, project id included, no gateway-side shortcut exists for it:
+
+    POST https://{location}-aiplatform.googleapis.com/v1/projects/{project}
+        /locations/{location}/publishers/google/models/{model}:predictLongRunning
+
+Through the company gateway the same resource path is proxied verbatim, still
+authenticated with the gateway's own Bearer key (not a Google OAuth2 token —
+the gateway host itself is `VERTEX_VIDEO_BASE_URL`, project/location just
+become part of the *path*, they do not change how the request is authed):
+
+    VERTEX_VIDEO_BASE_URL=http://aigateway.t1.test.noahgrouptest.sg/vertexvideo
+    → POST {VERTEX_VIDEO_BASE_URL}/v1/projects/{project}/locations/{location}
+        /publishers/google/models/{model}:predictLongRunning
+
+`VERTEX_VIDEO_PROJECT` + `VERTEX_VIDEO_LOCATION` are therefore always required
+(the resource path is meaningless without them); `VERTEX_VIDEO_MODEL_PATH`
+still exists to pin the whole path wholesale for a non-standard gateway shape.
 """
 
 from __future__ import annotations
@@ -50,14 +62,17 @@ class VertexVideoModel(VideoModel):
             return override.strip("/")
         publisher = self.cfg.extra.get("PUBLISHER") or "google"
         project = self.cfg.extra.get("PROJECT")
-        # Veo 3.1 is only served from us-central1 today.
         location = self.cfg.extra.get("LOCATION") or "us-central1"
-        if project and location:
-            return (
-                f"projects/{project}/locations/{location}"
-                f"/publishers/{publisher}/models/{self.model}"
+        if not project:
+            raise VideoGenError(
+                "vertex: VERTEX_VIDEO_PROJECT is required — Vertex's resource path is "
+                "projects/{project}/locations/{location}/publishers/google/models/{model}, "
+                "there is no path without a real GCP project id in it"
             )
-        return f"publishers/{publisher}/models/{self.model}"
+        return (
+            f"projects/{project}/locations/{location}"
+            f"/publishers/{publisher}/models/{self.model}"
+        )
 
     def _url(self, verb: str) -> str:
         version = self.cfg.extra.get("API_VERSION") or "v1"

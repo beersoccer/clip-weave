@@ -1,8 +1,8 @@
 """Tests for the project-level render-path decision.
 
-The path is the user's choice, made once per project in BRIEF.md rather than
-inferred per frame. `visual_type` stays available as a per-frame override, which
-only matters for a `mixed` project.
+The path is the user's choice, made once per project in BRIEF.md. A frame can
+override it with its own `render:` line — same `html | t2v` vocabulary at both
+levels, no separate `mixed` value or `visual_type` keyword.
 """
 
 import logging
@@ -28,7 +28,7 @@ def test_unset_when_brief_has_no_render_key(tmp_path):
     assert rp.resolve(tmp_path) == (None, "unset")
 
 
-@pytest.mark.parametrize("value", ["html", "t2v", "mixed"])
+@pytest.mark.parametrize("value", ["html", "t2v"])
 def test_every_valid_value_resolves(tmp_path, value):
     _brief(tmp_path, f"---\nworkflow: x\nrender: {value}\n---\n")
     path, source = rp.resolve(tmp_path)
@@ -56,9 +56,9 @@ def test_lowercase_brief_filename_is_read(tmp_path):
     `test_persist_ignores_a_lowercase_brief` below exercises the same branch from
     the write side, where the collision does not mask anything.
     """
-    _brief(tmp_path, "---\nrender: mixed\n---\n", name="brief.md")
+    _brief(tmp_path, "---\nrender: t2v\n---\n", name="brief.md")
     path, source = rp.resolve(tmp_path)
-    assert path == "mixed"
+    assert path == "t2v"
     assert source in ("BRIEF.md:render", "brief.md:render")
 
 
@@ -71,6 +71,16 @@ def test_invalid_value_warns_and_stays_unset(tmp_path, caplog):
     assert "veo" in caplog.text
 
 
+def test_mixed_value_is_rejected(tmp_path, caplog):
+    """`mixed` is no longer a valid project-level value — mixing is expressed by
+    per-frame `render:` overrides on top of a single html-or-t2v project default."""
+    _brief(tmp_path, "---\nrender: mixed\n---\n")
+    with caplog.at_level(logging.WARNING, logger="clip_weave.core.render_path"):
+        path, source = rp.resolve(tmp_path)
+    assert path is None
+    assert source == "unset"
+
+
 def test_render_outside_frontmatter_is_ignored(tmp_path):
     """Only the frontmatter block counts — prose must not set the render path."""
     _brief(tmp_path, "---\nworkflow: x\n---\n\n## Notes\nrender: t2v\n")
@@ -79,7 +89,7 @@ def test_render_outside_frontmatter_is_ignored(tmp_path):
 
 def test_default_is_html():
     assert rp.DEFAULT == "html"
-    assert rp.VALID == ("html", "t2v", "mixed")
+    assert rp.VALID == ("html", "t2v")
 
 
 # ── persist ───────────────────────────────────────────────────────────────────
@@ -96,8 +106,8 @@ def test_persist_then_resolve_round_trips(tmp_path):
 
 def test_persist_overwrites_an_existing_value(tmp_path):
     _brief(tmp_path, "---\nrender: html\nworkflow: x\n---\n")
-    rp.persist(tmp_path, "mixed")
-    assert rp.resolve(tmp_path)[0] == "mixed"
+    rp.persist(tmp_path, "t2v")
+    assert rp.resolve(tmp_path)[0] == "t2v"
     # exactly one render: line survives — no duplicate keys in the frontmatter
     assert (tmp_path / "BRIEF.md").read_text().count("render:") == 1
 
@@ -133,36 +143,34 @@ def test_persist_writes_only_the_brief_md_path(tmp_path):
 
 # ── frame_path ────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("value", ["motion", "html", "graphic", "graphics"])
-def test_frame_html_vocabulary(value):
-    assert rp.frame_path({"visual_type": value}, "t2v") == "html"
-
-
-@pytest.mark.parametrize(
-    "value", ["live_action", "live-action", "t2v", "footage", "realistic"]
-)
-def test_frame_t2v_vocabulary(value):
-    assert rp.frame_path({"visual_type": value}, "html") == "t2v"
+@pytest.mark.parametrize("value", ["html", "t2v"])
+def test_frame_render_vocabulary(value):
+    other = "t2v" if value == "html" else "html"
+    assert rp.frame_path({"render": value}, other) == value
 
 
 def test_frame_value_is_case_insensitive():
-    assert rp.frame_path({"visual_type": "Live-Action"}, "html") == "t2v"
+    assert rp.frame_path({"render": "T2V"}, "html") == "t2v"
 
 
-def test_visualtype_without_underscore_is_accepted():
-    assert rp.frame_path({"visualtype": "live_action"}, "html") == "t2v"
+def test_render_path_alias_is_accepted_on_a_frame():
+    assert rp.frame_path({"render_path": "t2v"}, "html") == "t2v"
 
 
-@pytest.mark.parametrize(
-    "project_default,expected", [("html", "html"), ("t2v", "t2v"), ("mixed", "html")]
-)
-def test_unannotated_frame_follows_the_project_default(project_default, expected):
-    """A `mixed` project with an unannotated frame falls to HTML — the free path."""
-    assert rp.frame_path({}, project_default) == expected
+@pytest.mark.parametrize("project_default", ["html", "t2v"])
+def test_unannotated_frame_follows_the_project_default(project_default):
+    assert rp.frame_path({}, project_default) == project_default
 
 
 def test_unrecognised_frame_value_falls_back_to_the_project_default(caplog):
     """A typo must never be read as "generate this"."""
-    assert rp.frame_path({"visual_type": "nonsense"}, "t2v") == "t2v"
-    assert rp.frame_path({"visual_type": "nonsense"}, "html") == "html"
-    assert rp.frame_path({"visual_type": "nonsense"}, "mixed") == "html"
+    assert rp.frame_path({"render": "nonsense"}, "t2v") == "t2v"
+    assert rp.frame_path({"render": "nonsense"}, "html") == "html"
+
+
+def test_old_visual_type_keyword_is_no_longer_read():
+    """`visual_type` was the old, separate frame-level vocabulary; the frame
+    override now uses the same `render:` key as the project level. A stray
+    `visual_type` line must not silently do anything."""
+    assert rp.frame_path({"visual_type": "live_action"}, "html") == "html"
+    assert rp.frame_path({"visual_type": "motion"}, "t2v") == "t2v"

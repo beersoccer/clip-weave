@@ -47,6 +47,7 @@ from typing import Any
 
 import yaml
 
+from clip_weave.core.llm_gateway import call_chat, resolve_gateway
 from clip_weave.core.storyboard import Frame, Storyboard, parse_storyboard
 
 logger = logging.getLogger(__name__)
@@ -203,12 +204,21 @@ def _build_spec(
             bits.append(f'Dialogue: "{frame.voiceover}"')
         audio = ". ".join(bits)
 
+    graphics_intent = bool(_FILMABLE_HINT.search(scene_text))
+    filmable_scene = scene_text
+    rewritten = False
+    if graphics_intent:
+        rewrite = _rewrite_graphics_scene(scene_text, sb=sb)
+        if rewrite:
+            filmable_scene = rewrite
+            rewritten = True
+
     spec = PromptSpec(
         index=frame.index,
         title=frame.title,
         subject=_clean(subject),
         action=_clean(action),
-        scene=_clean(_scene_with_reference(scene_text, ref_desc)),
+        scene=_clean(_scene_with_reference(filmable_scene, ref_desc)),
         camera=_camera_line(frame, sb),
         lighting_style=lighting_style,
         audio=audio,
@@ -216,14 +226,73 @@ def _build_spec(
         duration=int(frame.duration_seconds or 5),
         ratio=ratio,
         reference=reference or "",
-        needs_review=bool(_FILMABLE_HINT.search(scene_text)),
+        needs_review=graphics_intent and not rewritten,
     )
-    if spec.needs_review:
+    if rewritten:
+        spec.notes = "scene rewritten from graphic intent to a filmable shot by LLM — review before use"
+    elif spec.needs_review:
         spec.notes = (
-            "graphics/text-heavy frame — video models render type and charts poorly; "
-            "consider keeping this frame on the HTML path"
+            "graphics/text-heavy frame — no LLM gateway configured to rewrite it into a "
+            "filmable shot; consider keeping this frame on the HTML path"
         )
     return spec
+
+
+# Rewriting a graphics-intent scene line into a filmable shot is semantic work — no
+# deterministic transform turns "六张卡片弹入" into a camera move and a lighting setup —
+# so it goes through the same LLM gateway `workflow_router.py` uses for classification.
+# Gateway config is reused, in order: `ROUTER_*` → `HTML_GEN_*` → `VIDEO_ANALYSIS_*`.
+_REWRITE_GATEWAY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("ROUTER", ""),
+    ("HTML_GEN", ""),
+    ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
+)
+
+_REWRITE_SYSTEM_PROMPT = (
+    "You rewrite a storyboard frame's `scene:` line for a text-to-video model.\n\n"
+    "The input describes a GRAPHIC/UI intent meant for an HTML/motion-graphics build "
+    "(card animations, counters, typography reveals, chart hits) — a video model cannot "
+    "render on-screen text or UI reliably, and copying the line verbatim would ask it to.\n\n"
+    "Rewrite it into ONE filmable live-action shot that preserves the subject and the "
+    "moment's intent, but replaces the graphic mechanic with real-world camera work: "
+    "framing, camera movement, lighting, materials, or subject action. Do not mention "
+    "cards, text, counters, UI, or any on-screen graphic element in the rewrite.\n\n"
+    "Reply with the rewritten scene line only — no preamble, no quotes, no explanation. "
+    "Keep it under 40 words, in the same language as the input."
+)
+
+
+def _rewrite_graphics_scene(scene_text: str, *, sb: Storyboard) -> str | None:
+    """Rewrite a graphics-intent `scene:` line into a filmable shot via the LLM gateway.
+
+    Returns None (never raises) when no gateway is configured or the call fails —
+    callers fall back to flagging the frame `needs_review` instead.
+    """
+    gw = resolve_gateway(_REWRITE_GATEWAY_PREFIXES)
+    if not gw:
+        logger.info(
+            "Scene rewrite skipped for %r (no ROUTER_*/HTML_GEN_*/VIDEO_ANALYSIS_* gateway "
+            "configured) — flagging needs_review instead",
+            scene_text[:60],
+        )
+        return None
+
+    theme = sb.message
+    user = f"scene: {scene_text.strip()}"
+    if theme:
+        user += f"\noverall theme: {theme}"
+
+    try:
+        content = call_chat(gw, system=_REWRITE_SYSTEM_PROMPT, user=user, max_tokens=200)
+    except Exception as exc:  # noqa: BLE001 - any gateway/network failure degrades the same way
+        logger.warning("Scene rewrite failed (%s) — flagging needs_review instead", exc)
+        return None
+
+    rewritten = content.strip().strip('"').strip("“”")
+    if not rewritten:
+        logger.warning("Scene rewrite returned an empty answer — flagging needs_review instead")
+        return None
+    return rewritten
 
 
 def _pick_reference(frame: Frame, min_score: float | None) -> tuple[str | None, str]:

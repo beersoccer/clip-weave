@@ -55,7 +55,10 @@ def load_config() -> ProviderConfig:
         "ali",
         "ALI_VIDEO",
         default_base_url="http://aigateway.t1.test.noahgrouptest.com/alivideo",
-        default_model="wan2.5-t2v-preview",
+        # wan2.7-t2v (default as of 2026-08) — wan2.5-t2v-preview is a superseded
+        # preview build. Confirmed available on this gateway via
+        # `scripts/verify_video_gateway.py --models --provider ali`.
+        default_model="wan2.7-t2v",
         extra_keys=("SUBMIT_PATH", "TASK_PATH", "PROTOCOL"),
     )
 
