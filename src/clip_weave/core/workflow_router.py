@@ -100,12 +100,13 @@ class RouteDecision:
 
 
 _GATEWAY_PREFIXES: tuple[tuple[str, str], ...] = (
-    # VIDEO_ANALYSIS_* first: on our gateway that route is OpenAI-compatible
-    # (`/vertex/v1/chat/completions`), while HTML_GEN_* points at the Bedrock route,
-    # which speaks Anthropic-native `/v1/messages` and 404s on `/chat/completions`.
+    # CLAUDE_* is the dedicated general-LLM config for all reasoning tasks in
+    # clip-weave (routing, rewriting, quality checks). Set CLAUDE_BASE_URL +
+    # CLAUDE_API_KEY + CLAUDE_MODEL to point at the Anthropic API or a compatible
+    # proxy. VIDEO_ANALYSIS_* / EMBEDDING_* serve specialised purposes and must
+    # not be reused here; ROUTER_* is a legacy fallback for backward compatibility.
+    ("CLAUDE", "claude-sonnet-4-6"),
     ("ROUTER", ""),
-    ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
-    ("HTML_GEN", ""),
 )
 
 

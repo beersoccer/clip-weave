@@ -243,9 +243,11 @@ def _build_spec(
 # so it goes through the same LLM gateway `workflow_router.py` uses for classification.
 # Gateway config is reused, in order: `ROUTER_*` → `HTML_GEN_*` → `VIDEO_ANALYSIS_*`.
 _REWRITE_GATEWAY_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("ROUTER", ""),
-    ("HTML_GEN", ""),
-    ("VIDEO_ANALYSIS", "gemini-2.5-flash"),
+    # CLAUDE_* is the dedicated general-LLM config — points at the Anthropic API
+    # (or a compatible proxy) and should be used for all reasoning/rewriting tasks.
+    # VIDEO_ANALYSIS_* and EMBEDDING_* are specialised and must not be reused here.
+    ("CLAUDE", "claude-sonnet-4-6"),
+    ("ROUTER", ""),  # legacy fallback for projects that haven't added CLAUDE_* yet
 )
 
 _REWRITE_SYSTEM_PROMPT = (
@@ -283,14 +285,28 @@ def _rewrite_graphics_scene(scene_text: str, *, sb: Storyboard) -> str | None:
         user += f"\noverall theme: {theme}"
 
     try:
-        content = call_chat(gw, system=_REWRITE_SYSTEM_PROMPT, user=user, max_tokens=200)
+        # 2000 tokens + 60s timeout: thinking models (Gemini 2.5 Flash) consume hidden
+        # reasoning tokens before the answer. 600 tokens left outputs truncated mid-sentence
+        # because ~580 tokens were burned on reasoning; 2000 gives the actual reply room.
+        # 60s: thinking models can take 30-50s end-to-end; 20s caused premature timeouts.
+        content = call_chat(
+            gw, system=_REWRITE_SYSTEM_PROMPT, user=user, max_tokens=2000, timeout=60
+        )
     except Exception as exc:  # noqa: BLE001 - any gateway/network failure degrades the same way
         logger.warning("Scene rewrite failed (%s) — flagging needs_review instead", exc)
         return None
 
-    rewritten = content.strip().strip('"').strip("“”")
+    rewritten = content.strip().strip('"“”')
     if not rewritten:
         logger.warning("Scene rewrite returned an empty answer — flagging needs_review instead")
+        return None
+    # Guard against truncated output: a plausible filmable scene description needs at least
+    # ~8 characters. Shorter answers are reasoning-token overflow artefacts, not real rewrites.
+    if len(rewritten) < 8:
+        logger.warning(
+            "Scene rewrite suspiciously short (%r) — likely truncated; flagging needs_review",
+            rewritten,
+        )
         return None
     return rewritten
 
