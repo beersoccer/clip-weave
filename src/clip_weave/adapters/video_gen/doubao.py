@@ -41,7 +41,10 @@ def load_config() -> ProviderConfig:
         "doubao",
         "DOUBAO_VIDEO",
         default_base_url="http://aigateway.t1.test.noahgrouptest.com/doubaovideo",
-        default_model="doubao-seedance-1-0-pro-250528",
+        # Seedance 2.0 (default as of 2026-08) — 1.0-pro is the prior generation and
+        # 1.5-pro is not provisioned on this gateway (404 InvalidEndpointOrModel).
+        # Confirmed on the gateway: `scripts/verify_video_gateway.py --models --provider doubao`.
+        default_model="doubao-seedance-2-0-260128",
         extra_keys=("TASKS_PATH", "DURATIONS"),
     )
 
@@ -49,10 +52,11 @@ def load_config() -> ProviderConfig:
 class DoubaoVideoModel(VideoModel):
     """Text/image-to-video via Ark's `contents/generations/tasks` endpoint."""
 
-    # Seedance 1.0 pro only accepts 5 or 10; 1.5 / 2.0 accept 4–15. Set
-    # DOUBAO_VIDEO_DURATIONS (e.g. "4-15" or "5,10") to match your model.
-    duration_range = (5, 10)
-    duration_choices = (5, 10)
+    # Seedance 2.0 accepts 4–15s (confirmed against the gateway); 1.0-pro only
+    # accepts 5 or 10. Set DOUBAO_VIDEO_DURATIONS (e.g. "4-15" or "5,10") if you
+    # switch DOUBAO_VIDEO_MODEL to a model with different limits.
+    duration_range = (4, 15)
+    duration_choices = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

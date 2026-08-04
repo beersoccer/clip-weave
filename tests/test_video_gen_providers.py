@@ -57,12 +57,18 @@ def test_require_lists_every_missing_field():
 
 def test_from_env_falls_back_to_the_shared_gateway_key(monkeypatch):
     monkeypatch.delenv("DOUBAO_VIDEO_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "shared-key")
     monkeypatch.setenv("DOUBAO_VIDEO_BASE_URL", "http://gw/doubaovideo/")
     cfg = ProviderConfig.from_env("doubao", "DOUBAO_VIDEO", default_model="m")
     assert cfg.api_key == "shared-key"
     assert cfg.base_url == "http://gw/doubaovideo"  # trailing slash stripped
+
+
+def test_from_env_prefers_providers_own_key_over_shared(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "shared-key")
+    monkeypatch.setenv("DOUBAO_VIDEO_API_KEY", "doubao-own-key")
+    cfg = ProviderConfig.from_env("doubao", "DOUBAO_VIDEO", default_model="m")
+    assert cfg.api_key == "doubao-own-key"
 
 
 def test_get_model_rejects_unknown_provider():
@@ -72,8 +78,20 @@ def test_get_model_rejects_unknown_provider():
 
 # ── clamp_duration ────────────────────────────────────────────────────────────
 
-def test_doubao_clamps_to_the_nearest_allowed_choice():
-    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "doubao-seedance-1-0-pro"))
+def test_doubao_clamps_within_the_default_seedance_2_range():
+    """Default model is Seedance 2.0, which accepts any 4-15s (no fixed choices) —
+    confirmed against the gateway in scripts/verify_video_gateway.py --models."""
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "doubao-seedance-2-0-260128"))
+    assert vm.clamp_duration(5.851) == 6
+    assert vm.clamp_duration(99) == 15
+    assert vm.clamp_duration(None) == 4
+
+
+def test_doubao_durations_fixed_choice_override_for_1_0_pro():
+    """Seedance 1.0-pro only accepts 5 or 10 — set via DOUBAO_VIDEO_DURATIONS."""
+    vm = DoubaoVideoModel(
+        _cfg("doubao", "http://gw/d", "doubao-seedance-1-0-pro", DURATIONS="5,10")
+    )
     assert vm.clamp_duration(5.851) == 5
     assert vm.clamp_duration(8) == 10
     assert vm.clamp_duration(None) == 5
@@ -262,15 +280,26 @@ def test_ali_poll_returns_video_url_on_success():
 
 # ── Google Veo / Vertex ───────────────────────────────────────────────────────
 
-def test_vertex_gateway_model_path_omits_project():
+def test_vertex_requires_project_in_the_resource_path():
+    """Vertex's resource path is meaningless without a project — no gateway shortcut."""
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/vertexvideo", "veo-3.1"))
+    with pytest.raises(VideoGenError, match="VERTEX_VIDEO_PROJECT is required"):
+        vm.submit(VideoRequest(prompt="p"))
+
+
+def test_vertex_path_includes_project_and_location():
     session = FakeSession(FakeResponse({"name": "operations/op-1"}))
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/vertexvideo", "veo-3.1"), session=session)
+    vm = VertexVideoModel(
+        _cfg("vertex", "http://gw/vertexvideo", "veo-3.1", PROJECT="my-proj", LOCATION="us-central1"),
+        session=session,
+    )
 
     op = vm.submit(VideoRequest(prompt="p", ratio="16:9", resolution="1080p", duration=6))
 
     assert op == "operations/op-1"
     assert session.calls[0]["url"] == (
-        "http://gw/vertexvideo/v1/publishers/google/models/veo-3.1:predictLongRunning"
+        "http://gw/vertexvideo/v1/projects/my-proj/locations/us-central1"
+        "/publishers/google/models/veo-3.1:predictLongRunning"
     )
     params = session.calls[0]["json"]["parameters"]
     assert params["durationSeconds"] == 6
@@ -278,19 +307,7 @@ def test_vertex_gateway_model_path_omits_project():
     assert params["sampleCount"] == 1
 
 
-def test_vertex_raw_path_includes_project_and_location():
-    session = FakeSession(FakeResponse({"name": "op"}))
-    vm = VertexVideoModel(
-        _cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="my-proj", LOCATION="us-central1"),
-        session=session,
-    )
-    vm.submit(VideoRequest(prompt="p"))
-    assert "projects/my-proj/locations/us-central1/publishers/google/models/veo-3.1" in (
-        session.calls[0]["url"]
-    )
-
-
-def test_vertex_model_path_override_wins():
+def test_vertex_model_path_override_skips_project_requirement():
     session = FakeSession(FakeResponse({"name": "op"}))
     vm = VertexVideoModel(
         _cfg("vertex", "http://gw/v", "veo-3.1", MODEL_PATH="custom/path/model"), session=session
@@ -301,21 +318,21 @@ def test_vertex_model_path_override_wins():
 
 def test_vertex_coerces_unsupported_ratio_to_16x9():
     session = FakeSession(FakeResponse({"name": "op"}))
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     vm.submit(VideoRequest(prompt="p", ratio="1:1"))
     assert session.calls[0]["json"]["parameters"]["aspectRatio"] == "16:9"
 
 
 def test_vertex_submit_without_operation_name_raises():
     session = FakeSession(FakeResponse({"error": {"message": "CONSUMER_INVALID"}}))
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     with pytest.raises(VideoGenError, match="no operation name"):
         vm.submit(VideoRequest(prompt="p"))
 
 
 def test_vertex_poll_running_until_done():
     session = FakeSession(FakeResponse({"done": False}))
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     status = vm.poll("operations/op-1")
     assert status.state == "running"
     assert session.calls[0]["url"].endswith(":fetchPredictOperation")
@@ -326,7 +343,7 @@ def test_vertex_poll_success_reads_gcs_uri():
     session = FakeSession(
         FakeResponse({"done": True, "response": {"videos": [{"gcsUri": "gs://b/v.mp4"}]}})
     )
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     status = vm.poll("op")
     assert status.state == "succeeded"
     assert status.video_url == "gs://b/v.mp4"
@@ -336,7 +353,7 @@ def test_vertex_poll_success_reads_inline_base64():
     session = FakeSession(
         FakeResponse({"done": True, "response": {"videos": [{"bytesBase64Encoded": "AAAA"}]}})
     )
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     assert vm.poll("op").video_b64 == "AAAA"
 
 
@@ -345,7 +362,7 @@ def test_vertex_poll_reports_rai_filter_reason():
         FakeResponse({"done": True,
                       "response": {"videos": [], "raiMediaFilteredReasons": ["blocked: violence"]}})
     )
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     status = vm.poll("op")
     assert status.state == "failed"
     assert "violence" in status.error
@@ -353,7 +370,7 @@ def test_vertex_poll_reports_rai_filter_reason():
 
 def test_vertex_poll_surfaces_operation_error():
     session = FakeSession(FakeResponse({"error": {"message": "PERMISSION_DENIED"}}))
-    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1"), session=session)
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     status = vm.poll("op")
     assert status.state == "failed"
     assert status.error == "PERMISSION_DENIED"

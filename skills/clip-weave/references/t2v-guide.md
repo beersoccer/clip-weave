@@ -13,37 +13,33 @@
 | 不适合 | 电影级写实、复杂物理 | 精确文字排版、品牌色严格一致、数据准确性 |
 
 品牌色和文字排版必须准确的镜头**不要**交给 T2V —— 模型无法保证十六进制色值与字形。
-`T2V-PROMPTS.md` 会把这类帧标记 `needs_review`，建议留在 HTML 路径。
+图文/数据意图的帧会先尝试由 LLM 网关改写成可拍摄镜头；改写失败或网关未配置时，
+`T2V-PROMPTS.md` 才会把这类帧标记 `needs_review`，建议留在 HTML 路径。
 
 ## 路径在项目之初决定一次
 
-写进 `BRIEF.md` frontmatter，不是逐帧决定：
+写进 `BRIEF.md` frontmatter，不是逐帧决定，只有 `html` / `t2v` 两个值，没有 `mixed`：
 
 ```yaml
 ---
 workflow: product-launch-video
-render: t2v       # html（默认）| t2v | mixed
+render: t2v       # html（默认）| t2v
 ---
 ```
 
 `run --render ask`（默认）会在缺失时问一次并持久化，同一项目不重复询问；也可以直接
 `run --render t2v` 跳过询问。也接受 `render_path:` 作为别名。非法值会告警并视为未设置。
 
-只有 `mixed` 才需要逐帧标注，指出哪些镜头走 T2V：
+混排通过**逐帧覆盖**表达：项目默认选一个，个别镜头在帧上写同名的 `render:` 覆盖它——
+覆盖用的是与项目级完全相同的词表，不是单独的一套：
 
 ```markdown
 ## Frame 2 — 实拍开场
 - scene: 城市夜景中一辆红色轿车驶过湿滑路面
-- visual_type: live_action
+- render: t2v
 ```
 
-识别的取值（大小写不敏感）：
-
-- 走 T2V：`live_action` `live-action` `t2v` `footage` `realistic`
-- 走 HTML：`motion` `html` `graphic` `graphics`
-
-未标注或取值无法识别的帧跟随项目默认；`mixed` 项目里这类帧落到 **HTML** —— 确定性、
-零推理费用的那一侧。
+未标注或取值无法识别的帧跟随项目默认。
 
 `gen-video` 会核对 `BRIEF.md` 的 `render:` 和当前操作是否一致：若 `render: html` 却在跑
 `gen-video`，会打印矛盾提示并要求确认（`--yes` 跳过确认；非交互环境不询问，按用户已设置的
@@ -115,8 +111,8 @@ uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider do
 
 ## 混排必须在 FFmpeg 层
 
-`render: mixed` 项目里，动效镜头（HTML）与写实镜头（T2V）并存时，**在 FFmpeg 层合流，
-不要把 T2V 片段当 `<video>` 塞进 HTML 合成。** 原因：Chrome 无法同时 seek 多个 `<video>`
+用逐帧 `render:` 覆盖混排的项目里，动效镜头（HTML）与写实镜头（T2V）并存时，**在 FFmpeg
+层合流，不要把 T2V 片段当 `<video>` 塞进 HTML 合成。** 原因：Chrome 无法同时 seek 多个 `<video>`
 （解码器耗尽），视频密集的合成会退化为单 worker 甚至超时。另外 `<video>` 必须是
 `index.html` 根的直接子元素，放进 sub-composition 会渲染黑屏（Rule Guard § 7 检查的
 正是这条）。

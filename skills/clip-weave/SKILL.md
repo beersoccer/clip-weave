@@ -158,7 +158,7 @@ Template: `references/brief-template.md`.
 
 ```bash
 uv run python -m clip_weave run --message "核心信息" --url "<URL>" --render ask
-# --render html | t2v | mixed | ask（默认 ask：已设置过就复用，没设置过则询问）
+# --render html | t2v | ask（默认 ask：已设置过就复用，没设置过则询问）
 ```
 
 ## 5. Asset Matcher (if capture/ has assets)
@@ -240,24 +240,25 @@ HTML 路径（HF skill 写 composition → 逐帧渲染）适合图形、文字�
 ```yaml
 ---
 workflow: product-launch-video
-render: html      # html（默认）| t2v | mixed
+render: html      # html（默认）| t2v
 ---
 ```
 
 `run` 命令会处理这个决策（`--render ask` 是默认值）：已设置过就复用并回显来源；没设置过、
-且在交互终端里，会打印三个选项的取舍并用 `click.prompt` 问一次；非交互环境直接落到默认值
+且在交互终端里，会打印两个选项的取舍并用 `click.prompt` 问一次；非交互环境直接落到默认值
 `html` 并说明如何覆盖。选定后写回 `BRIEF.md`，同一项目不会再问第二次。
 
-只有 `render: mixed` 才需要逐帧标注，指出哪些镜头走 T2V：
+项目级只有 `html` / `t2v` 两个值，没有 `mixed`。混排通过**逐帧覆盖**表达——项目默认选一个，
+个别镜头在帧上写同名的 `render:` 覆盖它：
 
 ```markdown
 ## Frame 2 — 实拍开场
 - scene: 城市夜景中一辆红色轿车驶过湿滑路面
-- visual_type: live_action
+- render: t2v
 ```
 
-`motion` 走 HTML，`live_action` 走 T2V；未标注或取值无法识别的帧跟随项目默认，
-`mixed` 项目里这类帧落到 **HTML**。
+帧级 `render:` 与项目级用的是同一套词表（`html` | `t2v`），未标注或取值无法识别的帧跟随
+项目默认。
 
 T2V 提示词不是即时拼装的，而是先落成 `T2V-PROMPTS.md` —— **那才是用户直接编辑的文件**：
 
@@ -270,9 +271,11 @@ uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider do
 若 `BRIEF.md` 写的是 `render: html` 却在跑 `gen-video`，命令会提示这个矛盾并要求确认
 （`--yes` 跳过确认，非交互环境不询问）。
 
-以图文/数据为主的帧会被 `T2V-PROMPTS.md` 标记 `needs_review` —— 文生视频渲染文字不可靠，
-这些帧建议留在 HTML 路径。provider 选型、时长约束、GCP project 配置、混排注意事项见
-`references/t2v-guide.md`。
+图文/数据意图的帧（"六张卡片弹入"、"902 从零计数爆炸放大"这类）不能确定性地转成可拍摄
+镜头，所以经同一个 LLM 网关做语义改写——把图形意图换成保留画面主旨的实拍镜头描述（镜头、
+光线、材质），绝不提卡片/文字/UI。改写成功会在 `T2V-PROMPTS.md` 标一行改写说明，建议生成前
+过一遍；网关未配置或调用失败时才退回旧行为——标记 `needs_review` 并建议留在 HTML 路径。
+provider 选型、时长约束、GCP project 配置、混排注意事项见 `references/t2v-guide.md`。
 
 ## Resume table
 
@@ -284,4 +287,4 @@ uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider do
 | `BRIEF.md` exists | `/hyperframes` directly |
 | Composition written, Rule Guard not run | § 7 (guard) |
 | Guard passed, check/render pending | continue in HF workflow |
-| `BRIEF.md` 的 `render:` 为 `t2v` 或 `mixed` | § 8（渲染路径） |
+| `BRIEF.md` 的 `render:` 为 `t2v` | § 8（渲染路径） |

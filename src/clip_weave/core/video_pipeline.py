@@ -42,6 +42,30 @@ logger = logging.getLogger(__name__)
 Reporter = Callable[[str], None]
 
 
+def _safe_reporter(report: Reporter) -> Reporter:
+    """Wrap a `report` callback so a broken sink (dead pty, closed pipe, a UI
+    callback that raises) can never take down the generation loop with it.
+
+    `report` is a progress side-channel, not part of the task's outcome — a
+    clip that finished downloading is finished regardless of whether printing
+    "done" succeeds. Before this wrapper, a `report()` call sat inside the
+    download `try/except`, so a failure or a slow/blocked write there could
+    either mislabel a successful download as failed, or (if the underlying
+    write blocks instead of raising, e.g. a stalled pty) hang the whole
+    submit/poll/download loop forever with no further output and no
+    manifest.json ever written — indistinguishable from the process looking
+    "stuck" from the outside.
+    """
+
+    def _wrapped(message: str) -> None:
+        try:
+            report(message)
+        except Exception:  # noqa: BLE001 - a broken progress sink must never abort generation
+            logger.warning("report sink failed for message: %s", message[:200], exc_info=True)
+
+    return _wrapped
+
+
 @dataclass
 class ClipResult:
     index: int
@@ -83,6 +107,7 @@ def generate_clips(
     render_default: str | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
+    report = _safe_reporter(report)
     sb = parse_storyboard(storyboard_path)
     for warn in sb.warnings:
         logger.warning("storyboard: %s", warn)
@@ -90,10 +115,13 @@ def generate_clips(
         raise VideoGenError(f"no frames parsed from {storyboard_path}")
 
     selected = _select(sb, frames)
-    if render_default == "mixed" and not frames:
+    if render_default is not None and not frames:
         # --frames is an explicit operator override and must win outright — only
-        # filter by visual_type when the caller did not hand-pick frame indices.
-        selected = [f for f in selected if frame_path(f.meta, "mixed") != "html"]
+        # filter by each frame's effective render path when the caller did not
+        # hand-pick frame indices. gen-video always produces T2V clips, so a
+        # frame whose effective path (its own `render:` override, else the
+        # project default) resolves to "html" has nothing to generate here.
+        selected = [f for f in selected if frame_path(f.meta, render_default) == "t2v"]
     target_ratio = ratio or sb.aspect_ratio()
     prompt_overrides = prompt_overrides or {}
     duration_overrides = duration_overrides or {}
@@ -196,11 +224,15 @@ def generate_clips(
             dest = out / f"{result.index:02d}-{_slug_for(sb, result.index)}.mp4"
             try:
                 vm.download(status, dest)
-                result.state, result.video_path = "succeeded", str(dest)
-                report(f"frame {result.index} done in {result.elapsed_seconds}s → {dest}")
             except Exception as exc:  # noqa: BLE001 - download/IO surface
                 result.state, result.error = "failed", f"download failed: {exc}"
                 logger.error("frame %s download failed: %s", result.index, exc)
+                continue
+            # Reporting progress is a side-effect, not part of the outcome — the
+            # clip already succeeded once download() returns, so a flaky report
+            # sink must not be able to relabel it as failed.
+            result.state, result.video_path = "succeeded", str(dest)
+            report(f"frame {result.index} done in {result.elapsed_seconds}s → {dest}")
         pending = still
 
     for result in pending:
@@ -240,9 +272,10 @@ def _build_model(provider: str, storyboard_path: str | Path, *, report: Reporter
     project, source = resolve_project(storyboard_path)
     if not project:
         raise VideoGenError(
-            "vertex: no GCP project id found. Vertex requires a real Google Cloud "
-            "project in its resource path (an arbitrary name returns 403 "
-            "CONSUMER_INVALID). Set VERTEX_VIDEO_PROJECT in .env, or add "
+            "vertex: no GCP project id found. Vertex's resource path is "
+            "projects/{project}/locations/{location}/publishers/google/models/{model} — "
+            "there is no path without a real GCP project id in it (an arbitrary name "
+            "returns 403 CONSUMER_INVALID). Set VERTEX_VIDEO_PROJECT in .env, or add "
             "`vertex_project: <project-id>` to BRIEF.md / the storyboard frontmatter, "
             "or set VERTEX_VIDEO_MODEL_PATH to the full resource path."
         )
@@ -264,6 +297,7 @@ def concat_clips(results: list[ClipResult], dest: Path, *, report: Reporter = lo
     video (Veo: 4/6/8s per call, Seedance/Wan: 5–15s), so a storyboard always
     comes back as N clips.
     """
+    report = _safe_reporter(report)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise VideoGenError("ffmpeg not found on PATH — install it to use --concat")
