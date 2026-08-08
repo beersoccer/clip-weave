@@ -20,7 +20,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ProviderConfig, TaskStatus, VideoGenError, VideoModel, VideoRequest
+from .base import (
+    ProviderCapabilities,
+    ProviderConfig,
+    TaskStatus,
+    VideoGenError,
+    VideoModel,
+    VideoRequest,
+)
 
 _STATE_MAP = {
     "pending": "pending",
@@ -48,6 +55,14 @@ _SIZE_TABLE = {
     ("1080p", "4:3"): "1632*1248",
     ("1080p", "3:4"): "1248*1632",
 }
+_LEGACY_RATIOS = frozenset(ratio for _, ratio in _SIZE_TABLE)
+_LEGACY_RESOLUTIONS = frozenset(resolution for resolution, _ in _SIZE_TABLE)
+_LEGACY_RESOLUTION_RATIOS = frozenset(_SIZE_TABLE)
+_WAN27_RESOLUTION_RATIOS = frozenset(
+    pair for pair in _SIZE_TABLE if pair[0] in {"720p", "1080p"}
+)
+_WAN27_RATIOS = frozenset(ratio for _, ratio in _WAN27_RESOLUTION_RATIOS)
+_WAN27_RESOLUTIONS = frozenset(resolution for resolution, _ in _WAN27_RESOLUTION_RATIOS)
 
 
 def load_config() -> ProviderConfig:
@@ -67,6 +82,24 @@ class AliVideoModel(VideoModel):
     """Text-to-video via DashScope's async video-synthesis endpoint."""
 
     duration_range = (2, 15)
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        if self._wan27:
+            ratios = _WAN27_RATIOS
+            resolutions = _WAN27_RESOLUTIONS
+            supported_resolution_ratios = _WAN27_RESOLUTION_RATIOS
+        else:
+            ratios = _LEGACY_RATIOS
+            resolutions = _LEGACY_RESOLUTIONS
+            supported_resolution_ratios = _LEGACY_RESOLUTION_RATIOS
+        return ProviderCapabilities(
+            ratios=ratios,
+            resolutions=resolutions,
+            duration_range=self.duration_range,
+            duration_choices=self.duration_choices,
+            supported_resolution_ratios=supported_resolution_ratios,
+        )
 
     @property
     def _submit_url(self) -> str:
@@ -106,7 +139,12 @@ class AliVideoModel(VideoModel):
             params["resolution"] = tier.upper()  # 720P / 1080P
             params["ratio"] = req.ratio
         else:
-            params["size"] = _SIZE_TABLE.get((tier, req.ratio)) or _SIZE_TABLE[("1080p", "16:9")]
+            try:
+                params["size"] = _SIZE_TABLE[(tier, req.ratio)]
+            except KeyError as exc:
+                raise VideoGenError(
+                    f"ali: unsupported legacy size combination {tier}/{req.ratio}"
+                ) from exc
         if req.seed is not None:
             params["seed"] = req.seed
 

@@ -6,7 +6,12 @@ No real HTTP: a FakeSession records requests and returns canned JSON.
 import pytest
 import requests
 
-from clip_weave.adapters.video_gen import VideoGenError, VideoRequest, get_model
+from clip_weave.adapters.video_gen import (
+    ProviderCapabilities,
+    VideoGenError,
+    VideoRequest,
+    get_model,
+)
 from clip_weave.adapters.video_gen.ali import AliVideoModel
 from clip_weave.adapters.video_gen.base import ProviderConfig, TaskStatus
 from clip_weave.adapters.video_gen.doubao import DoubaoVideoModel
@@ -76,6 +81,14 @@ def test_get_model_rejects_unknown_provider():
         get_model("midjourney")
 
 
+def test_provider_capabilities_preserves_reference_schemes_positional_argument():
+    capabilities = ProviderCapabilities(
+        frozenset(), frozenset(), (4, 8), None, frozenset({"gs"})
+    )
+    assert capabilities.reference_uri_schemes == frozenset({"gs"})
+    assert capabilities.supported_resolution_ratios is None
+
+
 # ── clamp_duration ────────────────────────────────────────────────────────────
 
 def test_doubao_clamps_within_the_default_seedance_2_range():
@@ -121,6 +134,47 @@ def test_ali_clamps_within_range():
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5-t2v-preview"))
     assert vm.clamp_duration(1) == 2
     assert vm.clamp_duration(99) == 15
+
+
+# ── provider capabilities ───────────────────────────────────────────────────
+
+def test_doubao_declares_http_reference_capabilities():
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"))
+    assert vm.capabilities.reference_uri_schemes == frozenset({"http", "https"})
+
+
+def test_ali_legacy_capabilities_match_the_size_table_and_have_no_reference_support():
+    vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5-t2v-preview"))
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16", "1:1", "4:3", "3:4"})
+    assert vm.capabilities.resolutions == frozenset({"480p", "720p", "1080p"})
+    assert vm.capabilities.supported_resolution_ratios == frozenset({
+        ("480p", "16:9"), ("480p", "9:16"), ("480p", "1:1"),
+        ("720p", "16:9"), ("720p", "9:16"), ("720p", "1:1"),
+        ("720p", "4:3"), ("720p", "3:4"),
+        ("1080p", "16:9"), ("1080p", "9:16"), ("1080p", "1:1"),
+        ("1080p", "4:3"), ("1080p", "3:4"),
+    })
+    assert ("480p", "4:3") not in vm.capabilities.supported_resolution_ratios
+    assert vm.capabilities.reference_uri_schemes == frozenset()
+
+
+def test_ali_wan27_capabilities_declare_known_resolution_ratio_pairs():
+    vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.7-t2v"))
+    assert vm.capabilities.resolutions == frozenset({"720p", "1080p"})
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16", "1:1", "4:3", "3:4"})
+    assert vm.capabilities.supported_resolution_ratios == frozenset({
+        ("720p", "16:9"), ("720p", "9:16"), ("720p", "1:1"),
+        ("720p", "4:3"), ("720p", "3:4"),
+        ("1080p", "16:9"), ("1080p", "9:16"), ("1080p", "1:1"),
+        ("1080p", "4:3"), ("1080p", "3:4"),
+    })
+
+
+def test_vertex_declares_veo_capabilities():
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1-generate-001"))
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16"})
+    assert vm.capabilities.duration_choices == (4, 6, 8)
+    assert vm.capabilities.reference_uri_schemes == frozenset({"gs"})
 
 
 # ── 豆包 / Seedance ───────────────────────────────────────────────────────────
@@ -231,11 +285,12 @@ def test_ali_protocol_can_be_forced_to_legacy():
     assert session.calls[0]["json"]["parameters"]["size"] == "1920*1080"
 
 
-def test_ali_unknown_size_combination_falls_back_to_1080p_16x9():
+def test_ali_legacy_rejects_unknown_size_combination_without_fallback():
     session = FakeSession(FakeResponse({"output": {"task_id": "t"}}))
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5"), session=session)
-    vm.submit(VideoRequest(prompt="p", ratio="21:9", resolution="480p"))
-    assert session.calls[0]["json"]["parameters"]["size"] == "1920*1080"
+    with pytest.raises(VideoGenError, match="unsupported legacy size combination"):
+        vm.submit(VideoRequest(prompt="p", ratio="4:3", resolution="480p"))
+    assert session.calls == []
 
 
 def test_ali_negative_prompt_goes_into_input():
@@ -316,11 +371,12 @@ def test_vertex_model_path_override_skips_project_requirement():
     assert session.calls[0]["url"] == "http://gw/v/v1/custom/path/model:predictLongRunning"
 
 
-def test_vertex_coerces_unsupported_ratio_to_16x9():
+def test_vertex_rejects_unsupported_ratio_before_sending_http():
     session = FakeSession(FakeResponse({"name": "op"}))
     vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
-    vm.submit(VideoRequest(prompt="p", ratio="1:1"))
-    assert session.calls[0]["json"]["parameters"]["aspectRatio"] == "16:9"
+    with pytest.raises(VideoGenError, match="vertex: unsupported ratio 1:1.*16:9.*9:16"):
+        vm.submit(VideoRequest(prompt="p", ratio="1:1"))
+    assert session.calls == []
 
 
 def test_vertex_submit_without_operation_name_raises():

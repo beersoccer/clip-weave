@@ -28,7 +28,7 @@ clip-weave 不替代 HyperFrames 或视频模型：它负责低门槛入口、�
 - `run`：创建项目、选择 Production Profile、写入 `BRIEF.md`，有 URL 时抓取素材。
 - `match-assets`：用视觉描述与语义检索给分镜提供打分的素材候选。
 - `guard`：在 HyperFrames 装配前检查媒体不能放进子合成，并拒绝 `STORYBOARD.md` 中废弃的帧级 `render:` / `render_path:`。
-- `gen-video`：仅用于 `t2v_brand_film` 项目；由 `STORYBOARD.md` 生成可手改的 `T2V-PROMPTS.md`，逐镜头提交、轮询、下载并可用 FFmpeg 合流。
+- `gen-video`：仅用于 `t2v_brand_film` 项目；由 `STORYBOARD.md` 生成可手改的 `T2V-PROMPTS.md`，在提交前按已选 provider 的静态 capability 做批量预检，再逐镜头提交、轮询、下载并可用 FFmpeg 合流。
 
 ## 快速开始
 
@@ -72,9 +72,9 @@ uv run python -m clip_weave gen-video videos/ev-launch/STORYBOARD.md \
 
 ## 当前实现与下一步
 
-现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头的可恢复 `manifest.json`。每次提交前、远端任务完成待下载时、下载完成或出现本地等待/下载错误时，清单都会原子更新。相同请求再次执行时会复用已完成文件，或仅继续轮询、下载既有任务；对于提交结果不确定的 `submitting` 记录，不会自动重提，以避免重复消耗模型额度。
+现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头的可恢复 `manifest.json`。非 dry-run 的 `gen-video` 会在任何提交前，针对选中 batch 的每个镜头，以已选 adapter 声明的静态 capability 检查比例、分辨率、时长和 reference；必需（`required`）reference 不能使用时，整个 batch 被阻止，不会提交任何镜头。可选（`optional`）reference 会按 capability 接受或丢弃，并将 accepted/dropped 结果、原因、requested parameters 与 applied parameters 写入 manifest。每次提交前、远端任务完成待下载时、下载完成或出现本地等待/下载错误时，清单都会原子更新。相同请求再次执行时会复用已完成文件，或仅继续轮询、下载既有任务；对于提交结果不确定的 `submitting` 记录，不会自动重提，以避免重复消耗模型额度。
 
-这不是 provider 端的 exactly-once 保证：清单不会自动重新提交任务。Reference Audit、关键帧候选、镜头质量契约、媒体 QC 和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
+该预检不上传或物化本地 reference，也不做远程 capability discovery。它不是 provider 端的 exactly-once 保证，且没有自动重试、artifact hash、媒体 QC 或完整的 G0-G4 质量系统；清单不会自动重新提交任务。关键帧候选、镜头质量契约和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
 
 ## 验证
 

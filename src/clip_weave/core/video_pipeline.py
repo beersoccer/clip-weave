@@ -18,7 +18,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import shutil
 import subprocess
@@ -33,6 +33,7 @@ from clip_weave.adapters.video_gen import (
     resolve_project,
 )
 from clip_weave.core.render_path import ProfileError, validate_frames
+from clip_weave.core.generation_preflight import preflight_request
 from clip_weave.core.storyboard import (
     Frame,
     Storyboard,
@@ -91,7 +92,7 @@ _MANIFEST_SCHEMA_VERSION = 2
 
 
 def _request_fingerprint(
-    *, provider: str, model: str, index: int, request: VideoRequest, reference: str
+    *, provider: str, model: str, index: int, request: VideoRequest, audit: dict[str, Any]
 ) -> str:
     payload = {
         "provider": provider,
@@ -105,7 +106,7 @@ def _request_fingerprint(
         "seed": request.seed,
         "generate_audio": request.generate_audio,
         "watermark": request.watermark,
-        "reference": reference,
+        "preflight_audit": audit,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -293,6 +294,7 @@ def generate_clips(
     duration_overrides: dict[int, int] | None = None,
     negative_overrides: dict[int, str] | None = None,
     reference_overrides: dict[int, str] | None = None,
+    reference_requirements: dict[int, Literal["optional", "required"]] | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
     report = _safe_reporter(report)
@@ -312,6 +314,7 @@ def generate_clips(
     duration_overrides = duration_overrides or {}
     negative_overrides = negative_overrides or {}
     reference_overrides = reference_overrides or {}
+    reference_requirements = reference_requirements or {}
 
     def prompt_for(frame: Frame) -> str:
         # T2V-PROMPTS.md wins when present — that is the file the user edits.
@@ -320,6 +323,7 @@ def generate_clips(
         )
 
     if dry_run:
+        report("[dry-run] provider capability check not performed")
         results = []
         for frame in selected:
             prompt = prompt_for(frame)
@@ -331,13 +335,46 @@ def generate_clips(
                     duration=duration or duration_overrides.get(frame.index)
                     or int(frame.duration_seconds or 5),
                     state="dry-run",
-                    extra={"ratio": target_ratio, "resolution": resolution},
+                    extra={
+                        "ratio": target_ratio,
+                        "resolution": resolution,
+                        "provider_capability_check": "not performed (dry-run)",
+                    },
                 )
             )
             report(f"[dry-run] frame {frame.index} ({frame.title}) {len(prompt)} chars\n  {prompt}")
         return results
 
     vm = model or _build_model(provider, storyboard_path, report=report)
+
+    preflight_by_index = {}
+    preflight_errors: list[str] = []
+    for frame in selected:
+        prompt = prompt_for(frame)
+        reference = reference_overrides.get(frame.index) or ""
+        request = VideoRequest(
+            prompt=prompt,
+            duration=duration or duration_overrides.get(frame.index) or int(frame.duration_seconds or 5),
+            ratio=target_ratio,
+            resolution=resolution,
+            negative_prompt=negative_overrides.get(frame.index) or frame_negative_prompt(frame),
+            seed=seed,
+            generate_audio=generate_audio,
+            watermark=watermark,
+            image_url=reference or None,
+        )
+        try:
+            preflight_by_index[frame.index] = preflight_request(
+                request,
+                vm.capabilities,
+                reference=reference or None,
+                reference_requirement=reference_requirements.get(frame.index),
+            )
+        except VideoGenError as exc:
+            preflight_errors.append(f"frame {frame.index}: {exc}")
+    if preflight_errors:
+        raise VideoGenError("preflight failed: " + "; ".join(preflight_errors))
+
     out = Path(out_dir) if out_dir else Path(storyboard_path).parent / "renders" / "ai-clips" / provider
     out.mkdir(parents=True, exist_ok=True)
 
@@ -357,37 +394,33 @@ def generate_clips(
 
     # ── submit or resume ─────────────────────────────────────────────────────
     for frame in selected:
-        prompt = prompt_for(frame)
-        secs = vm.clamp_duration(
-            duration or duration_overrides.get(frame.index) or frame.duration_seconds
-        )
+        preflight = preflight_by_index[frame.index]
+        request = preflight.request
         result = ClipResult(
             index=frame.index,
             title=frame.title,
-            prompt=prompt,
-            duration=secs,
-            extra={"ratio": target_ratio, "resolution": resolution, "model": vm.model},
+            prompt=request.prompt,
+            duration=request.duration,
+            extra={
+                "ratio": target_ratio,
+                "resolution": resolution,
+                "model": vm.model,
+                "requested_parameters": preflight.requested_parameters,
+                "applied_parameters": preflight.applied_parameters,
+                "reference_audit": asdict(preflight.reference_audit),
+            },
         )
-        reference = reference_overrides.get(frame.index) or ""
-        req = VideoRequest(
-            prompt=prompt,
-            duration=secs,
-            ratio=target_ratio,
-            resolution=resolution,
-            negative_prompt=negative_overrides.get(frame.index) or frame_negative_prompt(frame),
-            seed=seed,
-            generate_audio=generate_audio,
-            watermark=watermark,
-            image_url=reference if reference.startswith(("http://", "https://")) else None,
-        )
-        if reference and not reference.startswith(("http://", "https://")):
-            result.extra["reference_asset"] = reference
+        audit = {
+            "requested_parameters": preflight.requested_parameters,
+            "applied_parameters": preflight.applied_parameters,
+            "reference_audit": asdict(preflight.reference_audit),
+        }
         result.request_fingerprint = _request_fingerprint(
             provider=provider,
             model=vm.model,
             index=frame.index,
-            request=req,
-            reference=reference,
+            request=request,
+            audit=audit,
         )
         existing = _find_clip(manifest, manifest_path, frame.index, result.request_fingerprint)
         if existing:
@@ -408,7 +441,7 @@ def generate_clips(
         result.state = "submitting"
         _persist_clip(manifest_path, manifest, result)
         try:
-            result.task_id = vm.submit(req)
+            result.task_id = vm.submit(request)
         except VideoGenError as exc:
             result.error = str(exc)
             _persist_clip(manifest_path, manifest, result)

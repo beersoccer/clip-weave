@@ -18,7 +18,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ProviderConfig, TaskStatus, VideoGenError, VideoModel, VideoRequest
+from .base import (
+    ProviderCapabilities,
+    ProviderConfig,
+    TaskStatus,
+    VideoGenError,
+    VideoModel,
+    VideoRequest,
+)
 
 _STATE_MAP = {
     "queued": "pending",
@@ -57,6 +64,16 @@ class DoubaoVideoModel(VideoModel):
     # switch DOUBAO_VIDEO_MODEL to a model with different limits.
     duration_range = (4, 15)
     duration_choices = None
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            ratios=frozenset(),
+            resolutions=frozenset(),
+            duration_range=self.duration_range,
+            duration_choices=self.duration_choices,
+            reference_uri_schemes=frozenset({"http", "https"}),
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

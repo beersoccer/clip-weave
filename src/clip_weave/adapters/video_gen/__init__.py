@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .ali import AliVideoModel, load_config as load_ali_config
 from .base import (
+    ProviderCapabilities,
     ProviderConfig,
     TaskStatus,
     VideoGenError,
@@ -44,6 +45,7 @@ __all__ = [
     "AliVideoModel",
     "DoubaoVideoModel",
     "PROVIDERS",
+    "ProviderCapabilities",
     "ProviderConfig",
     "TaskStatus",
     "VertexVideoModel",
