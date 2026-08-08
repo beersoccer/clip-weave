@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+import traceback
 
 import pytest
 
@@ -247,9 +248,10 @@ def test_request_errors_are_converted_to_redacted_video_gen_errors(
     with pytest.raises(VideoGenError) as exc:
         action()
 
-    assert secret not in str(exc.value)
-    assert "Authorization" not in str(exc.value)
-    assert "upload.example" not in str(exc.value)
+    rendered = "".join(traceback.format_exception(exc.value))
+    assert secret not in rendered
+    assert "Authorization" not in rendered
+    assert "upload.example" not in rendered
 
 
 def test_configuration_error_does_not_leak_upload_headers() -> None:
