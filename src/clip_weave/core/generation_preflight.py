@@ -31,11 +31,11 @@ class PreflightResult:
 
 
 def _validate_capabilities(request: VideoRequest, capabilities: ProviderCapabilities) -> None:
-    if request.ratio not in capabilities.ratios:
+    if capabilities.ratios and request.ratio not in capabilities.ratios:
         raise VideoGenError(
             f"unsupported ratio {request.ratio!r}; supported ratios: {sorted(capabilities.ratios)!r}"
         )
-    if request.resolution not in capabilities.resolutions:
+    if capabilities.resolutions and request.resolution not in capabilities.resolutions:
         raise VideoGenError(
             f"unsupported resolution {request.resolution!r}; "
             f"supported resolutions: {sorted(capabilities.resolutions)!r}"
@@ -67,7 +67,12 @@ def _audit_reference(
         return ReferenceAudit(None, None, "not_requested", None, None)
 
     effective_requirement: ReferenceRequirement = requirement or "optional"
-    scheme = urlparse(reference).scheme.lower()
+    try:
+        scheme = urlparse(reference).scheme.lower()
+    except ValueError as error:
+        raise VideoGenError(
+            f"{effective_requirement} reference {reference!r} cannot be parsed: {error}"
+        ) from error
     if scheme in capabilities.reference_uri_schemes:
         return ReferenceAudit(reference, effective_requirement, "accepted", reference, None)
 

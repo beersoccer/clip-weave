@@ -98,6 +98,45 @@ def test_accepted_https_reference_is_preserved() -> None:
 
 
 @pytest.mark.parametrize(
+    "caps",
+    [
+        capabilities(ratios=frozenset()),
+        capabilities(resolutions=frozenset()),
+        capabilities(ratios=frozenset(), resolutions=frozenset()),
+        capabilities(
+            ratios=frozenset(),
+            resolutions=frozenset(),
+            supported_resolution_ratios=frozenset({("1080p", "16:9")}),
+        ),
+    ],
+)
+def test_unconstrained_capability_dimensions_accept_default_request(
+    caps: ProviderCapabilities,
+) -> None:
+    result = preflight_request(
+        VideoRequest(prompt="city"),
+        caps,
+        reference=None,
+        reference_requirement=None,
+    )
+
+    assert result.request.ratio == "16:9"
+    assert result.request.resolution == "1080p"
+
+
+def test_malformed_reference_uri_is_reported_as_video_gen_error() -> None:
+    reference = "https://example.com：443/path"
+
+    with pytest.raises(VideoGenError, match=r"required reference.*https://example\.com：443/path"):
+        preflight_request(
+            VideoRequest(prompt="city"),
+            capabilities(),
+            reference=reference,
+            reference_requirement="required",
+        )
+
+
+@pytest.mark.parametrize(
     ("video_request", "match"),
     [
         (VideoRequest(prompt="city", ratio="1:1"), r"ratio.*1:1.*16:9"),
