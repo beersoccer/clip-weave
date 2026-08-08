@@ -155,7 +155,7 @@ def _request_fingerprint(*, provider, model, index, request, reference):
 
 预期：通过。恢复测试将在下一任务重构主循环后转绿。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/clip_weave/core/video_pipeline.py tests/test_video_pipeline.py
@@ -244,7 +244,7 @@ results.append(result)
 
 预期：通过，包括既有 happy path、frames、提示词覆盖、concat 与 reporter 测试。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/clip_weave/core/video_pipeline.py tests/test_video_pipeline.py
@@ -274,7 +274,7 @@ git status --short
 
 预期：没有旧的“仅在本轮结束写 manifest”表述；测试和 CLI help 通过；无空白错误；最终仅修改计划内四个实现文件。
 
-- [ ] **步骤 3：提交**
+- [x] **步骤 3：提交**
 
 ```bash
 git add README.md docs/architecture.md src/clip_weave/core/video_pipeline.py tests/test_video_pipeline.py

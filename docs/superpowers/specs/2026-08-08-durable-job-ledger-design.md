@@ -1,6 +1,8 @@
 # 耐久任务账本设计
 
-**状态：** 已批准；尚未开始实现。
+**状态：** 已实现；PR #11 已合并（`ff9d2cc`）。
+
+**实现边界：** 已交付本文定义的版本化原子 `manifest.json`、请求指纹、`submitting`/`running`/`download_pending`/`succeeded`/`failed` 恢复状态机和本地重复提交防护。provider 端 exactly-once、自动重试/退避、artifact hash、媒体 QC、Reference Audit 与能力预检仍不属于这次交付。
 
 ## 目标
 
