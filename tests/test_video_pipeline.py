@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from clip_weave.adapters.video_gen import ProviderCapabilities, TaskStatus, VideoGenError
-from clip_weave.core import video_pipeline
+from clip_weave.core import proof_media, video_pipeline
 from clip_weave.core.proof_media import ResolvedReference
 from clip_weave.core.video_pipeline import ClipResult, concat_clips, generate_clips
 
@@ -353,6 +353,54 @@ def test_required_local_reference_materializes_before_submit_and_records_proof_m
     assert extra["reference_audit"]["applied"] == "https://cdn.example/keyframe.png"
 
 
+def test_materialize_reference_selects_supported_store_scheme_and_records_provenance(tmp_path, monkeypatch):
+    source = tmp_path / "assets" / "keyframe.png"
+    source.parent.mkdir()
+    source.write_bytes(b"proof")
+    monkeypatch.setenv("PROOF_MEDIA_HTTPS_UPLOAD_URL_TEMPLATE", "https://upload.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_HTTPS_URI_TEMPLATE", "https://cdn.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_GS_UPLOAD_URL_TEMPLATE", "https://upload.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_GS_URI_TEMPLATE", "gs://proof-bucket/{sha256}{suffix}")
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    uploads = []
+    monkeypatch.setattr(
+        proof_media.requests,
+        "put",
+        lambda url, *, data, headers: uploads.append((url, data.read(), headers)) or Response(),
+    )
+
+    resolved = proof_media.materialize_reference(
+        "assets/keyframe.png",
+        project_dir=tmp_path,
+        supported_schemes=frozenset({"gs"}),
+        source_note="Wikimedia Commons",
+        license_note="CC BY 4.0",
+    )
+
+    assert resolved.applied and resolved.applied.startswith("gs://proof-bucket/")
+    assert resolved.proof_media and resolved.proof_media["scheme"] == "gs"
+    assert resolved.proof_media["source_note"] == "Wikimedia Commons"
+    assert resolved.proof_media["license_note"] == "CC BY 4.0"
+    assert uploads and uploads[0][1] == b"proof"
+    ledger = json.loads((tmp_path / "renders" / "proof-media.json").read_text())
+    assert ledger["records"] == [
+        {
+            "source": "assets/keyframe.png",
+            "sha256": resolved.proof_media["sha256"],
+            "suffix": ".png",
+            "uri": resolved.applied,
+            "scheme": "gs",
+            "source_note": "Wikimedia Commons",
+            "license_note": "CC BY 4.0",
+            "created_at": ledger["records"][0]["created_at"],
+        }
+    ]
+
+
 def test_required_materialization_error_blocks_entire_batch_before_submit(tmp_path, monkeypatch):
     monkeypatch.setattr(
         video_pipeline,
@@ -412,7 +460,10 @@ def test_changed_proof_media_snapshot_does_not_reuse_manifest(tmp_path, monkeypa
     assert len(changed.submitted) == 1
 
 
-def test_optional_local_reference_is_dropped_with_exact_audit_in_manifest(tmp_path):
+def test_optional_local_reference_without_store_is_dropped_with_exact_audit_in_manifest(tmp_path, monkeypatch):
+    for scheme in ("HTTPS", "GS"):
+        for name in ("UPLOAD_URL_TEMPLATE", "URI_TEMPLATE", "UPLOAD_HEADERS_JSON"):
+            monkeypatch.delenv(f"PROOF_MEDIA_{scheme}_{name}", raising=False)
     _run(
         tmp_path,
         model=FakeModel(),
