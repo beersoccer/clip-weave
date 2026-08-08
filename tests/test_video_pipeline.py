@@ -12,6 +12,7 @@ import pytest
 
 from clip_weave.adapters.video_gen import ProviderCapabilities, TaskStatus, VideoGenError
 from clip_weave.core import video_pipeline
+from clip_weave.core.proof_media import ResolvedReference
 from clip_weave.core.video_pipeline import ClipResult, concat_clips, generate_clips
 
 STORYBOARD = """---
@@ -324,6 +325,91 @@ def test_required_local_reference_blocks_whole_batch_before_submit_or_output(tmp
 
     assert model.submitted == []
     assert not (tmp_path / "renders").exists()
+
+
+def test_required_local_reference_materializes_before_submit_and_records_proof_media(tmp_path, monkeypatch):
+    source = tmp_path / "keyframe.png"
+    source.write_bytes(b"proof")
+    resolved = ResolvedReference(
+        requested="./keyframe.png",
+        applied="https://cdn.example/keyframe.png",
+        proof_media={"sha256": "a" * 64, "uri": "https://cdn.example/keyframe.png", "scheme": "https", "source": "./keyframe.png"},
+    )
+    monkeypatch.setattr(video_pipeline, "materialize_reference", lambda *args, **kwargs: resolved)
+    model = FakeModel()
+
+    _run(
+        tmp_path,
+        model=model,
+        frames=[1],
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert model.submitted[0].image_url == "https://cdn.example/keyframe.png"
+    extra = _manifest(tmp_path)["clips"][0]["extra"]
+    assert extra["proof_media"] == resolved.proof_media
+    assert extra["reference_audit"]["requested"] == "./keyframe.png"
+    assert extra["reference_audit"]["applied"] == "https://cdn.example/keyframe.png"
+
+
+def test_required_materialization_error_blocks_entire_batch_before_submit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda *args, **kwargs: (_ for _ in ()).throw(VideoGenError("proof media configuration is missing")),
+    )
+    model = FakeModel()
+
+    with pytest.raises(VideoGenError, match=r"frame 1: required reference materialization failed"):
+        _run(
+            tmp_path,
+            model=model,
+            reference_overrides={1: "./keyframe.png"},
+            reference_requirements={1: "required"},
+        )
+
+    assert model.submitted == []
+
+
+def test_supported_remote_reference_skips_materialization(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not materialize remote URI")),
+    )
+    model = FakeModel()
+
+    _run(tmp_path, model=model, frames=[1], reference_overrides={1: "https://cdn.example/keyframe.png"})
+
+    assert model.submitted[0].image_url == "https://cdn.example/keyframe.png"
+
+
+def test_changed_proof_media_snapshot_does_not_reuse_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "keyframe.png"
+    source.write_bytes(b"proof")
+    snapshots = iter((
+        {"sha256": "a" * 64, "uri": "https://cdn.example/a.png", "scheme": "https", "source": "./keyframe.png"},
+        {"sha256": "b" * 64, "uri": "https://cdn.example/b.png", "scheme": "https", "source": "./keyframe.png"},
+    ))
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(reference, (snapshot := next(snapshots))["uri"], snapshot),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1], max_wait=0,
+        reference_overrides={1: "./keyframe.png"}, reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path, model=changed, frames=[1], reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert len(changed.submitted) == 1
 
 
 def test_optional_local_reference_is_dropped_with_exact_audit_in_manifest(tmp_path):

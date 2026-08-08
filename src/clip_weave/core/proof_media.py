@@ -28,6 +28,13 @@ class MaterializedReference:
     created: bool
 
 
+@dataclass(frozen=True)
+class ResolvedReference:
+    requested: str | None
+    applied: str | None
+    proof_media: dict[str, object] | None
+
+
 class ProofMediaStore(Protocol):
     def uri_for(self, *, scheme: str, sha256: str, suffix: str) -> str: ...
 
@@ -68,6 +75,10 @@ class HttpPutProofMediaStore:
         if urlparse(uri).scheme != scheme:
             raise VideoGenError(f"proof media {scheme}: URI template produced wrong scheme")
         return uri
+
+    @property
+    def schemes(self) -> frozenset[str]:
+        return frozenset(self._configurations)
 
     def materialize(self, path: Path, *, scheme: str, sha256: str) -> MaterializedReference:
         config = self._configuration(scheme)
@@ -179,6 +190,61 @@ def materialize_local_reference(
         scheme=created.scheme,
         created=created.created,
     )
+
+
+def materialize_reference(
+    reference: str | None,
+    *,
+    project_dir: Path,
+    supported_schemes: frozenset[str],
+    source_note: str | None,
+    license_note: str | None,
+) -> ResolvedReference:
+    """Resolve a provider-ready proof-media reference, uploading local files when needed."""
+    if not reference:
+        return ResolvedReference(None, None, None)
+
+    scheme = urlparse(reference).scheme.lower()
+    if scheme:
+        return ResolvedReference(reference, reference, None)
+
+    try:
+        store = HttpPutProofMediaStore.from_environment()
+        choices = sorted(store.schemes & supported_schemes)
+    except VideoGenError as exc:
+        raise VideoGenError(
+            "proof media configuration is required for local references; configure "
+            "PROOF_MEDIA_<SCHEME>_UPLOAD_URL_TEMPLATE and PROOF_MEDIA_<SCHEME>_URI_TEMPLATE"
+        ) from exc
+    if not choices:
+        raise VideoGenError(
+            "no configured proof media scheme is supported by this provider; configure "
+            "PROOF_MEDIA_<SCHEME>_UPLOAD_URL_TEMPLATE and PROOF_MEDIA_<SCHEME>_URI_TEMPLATE"
+        )
+
+    path = Path(reference)
+    if not path.is_absolute():
+        path = project_dir / path
+    materialized = materialize_local_reference(
+        path,
+        project_dir / "renders" / "proof-media.json",
+        store,
+        choices[0],
+        source=reference,
+        source_note=source_note,
+        license_note=license_note,
+    )
+    snapshot: dict[str, object] = {
+        "sha256": materialized.sha256,
+        "uri": materialized.uri,
+        "scheme": materialized.scheme,
+        "source": materialized.source,
+    }
+    if source_note:
+        snapshot["source_note"] = source_note
+    if license_note:
+        snapshot["license_note"] = license_note
+    return ResolvedReference(reference, materialized.uri, snapshot)
 
 
 def _configuration_from_environment(values: Mapping[str, str], scheme: str) -> _SchemeConfig:

@@ -270,3 +270,33 @@ def test_gen_video_required_local_reference_exits_before_any_submit(tmp_path, mo
     assert result.exit_code == 1
     assert "frame 1: required reference" in result.output
     assert model.submitted == []
+
+
+def test_gen_video_passes_reference_provenance_to_pipeline(tmp_path):
+    storyboard = _storyboard_and_profile(tmp_path, "t2v_brand_film")
+
+    class FakeSpec:
+        index = 1
+        duration = 5
+        negative = None
+        reference = "assets/keyframe.png"
+        reference_source = "Wikimedia Commons"
+        reference_license = "CC BY 4.0"
+        reference_requirement = "optional"
+        needs_review = False
+        notes = ""
+
+    class FakeDoc:
+        specs = [FakeSpec()]
+
+    with patch(
+        "clip_weave.core.t2v_prompt.load_or_create",
+        return_value=(FakeDoc(), tmp_path / "T2V-PROMPTS.md", False),
+    ), patch("clip_weave.core.t2v_prompt.literal_prompt", return_value="p"), patch(
+        "clip_weave.core.video_pipeline.generate_clips", return_value=[]
+    ) as generate:
+        result = CliRunner().invoke(cli, ["gen-video", str(storyboard), "--provider", "doubao"])
+
+    assert result.exit_code == 0, result.output
+    assert generate.call_args.kwargs["reference_sources"] == {1: "Wikimedia Commons"}
+    assert generate.call_args.kwargs["reference_licenses"] == {1: "CC BY 4.0"}

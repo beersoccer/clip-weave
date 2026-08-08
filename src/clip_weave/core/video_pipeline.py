@@ -16,9 +16,10 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import urlparse
 
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ from clip_weave.adapters.video_gen import (
 )
 from clip_weave.core.render_path import ProfileError, validate_frames
 from clip_weave.core.generation_preflight import preflight_request
+from clip_weave.core.proof_media import ResolvedReference, materialize_reference
 from clip_weave.core.storyboard import (
     Frame,
     Storyboard,
@@ -295,6 +297,8 @@ def generate_clips(
     negative_overrides: dict[int, str] | None = None,
     reference_overrides: dict[int, str] | None = None,
     reference_requirements: dict[int, Literal["optional", "required"]] | None = None,
+    reference_sources: dict[int, str] | None = None,
+    reference_licenses: dict[int, str] | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
     report = _safe_reporter(report)
@@ -315,6 +319,8 @@ def generate_clips(
     negative_overrides = negative_overrides or {}
     reference_overrides = reference_overrides or {}
     reference_requirements = reference_requirements or {}
+    reference_sources = reference_sources or {}
+    reference_licenses = reference_licenses or {}
 
     def prompt_for(frame: Frame) -> str:
         # T2V-PROMPTS.md wins when present — that is the file the user edits.
@@ -348,10 +354,26 @@ def generate_clips(
     vm = model or _build_model(provider, storyboard_path, report=report)
 
     preflight_by_index = {}
+    proof_media_by_index: dict[int, dict[str, object]] = {}
     preflight_errors: list[str] = []
     for frame in selected:
         prompt = prompt_for(frame)
         reference = reference_overrides.get(frame.index) or ""
+        resolved = ResolvedReference(reference or None, reference or None, None)
+        scheme = urlparse(reference).scheme.lower()
+        if reference and scheme not in vm.capabilities.reference_uri_schemes:
+            try:
+                resolved = materialize_reference(
+                    reference,
+                    project_dir=Path(storyboard_path).parent,
+                    supported_schemes=vm.capabilities.reference_uri_schemes,
+                    source_note=reference_sources.get(frame.index),
+                    license_note=reference_licenses.get(frame.index),
+                )
+            except VideoGenError as exc:
+                if reference_requirements.get(frame.index) == "required":
+                    preflight_errors.append(f"frame {frame.index}: required reference materialization failed: {exc}")
+                    continue
         request = VideoRequest(
             prompt=prompt,
             duration=duration or duration_overrides.get(frame.index) or int(frame.duration_seconds or 5),
@@ -361,15 +383,30 @@ def generate_clips(
             seed=seed,
             generate_audio=generate_audio,
             watermark=watermark,
-            image_url=reference or None,
+            image_url=resolved.applied,
         )
         try:
-            preflight_by_index[frame.index] = preflight_request(
+            capabilities = vm.capabilities
+            if reference and not scheme and resolved.applied != reference:
+                capabilities = replace(
+                    capabilities,
+                    reference_uri_schemes=capabilities.reference_uri_schemes | frozenset({""}),
+                )
+            preflight = preflight_request(
                 request,
-                vm.capabilities,
+                capabilities,
                 reference=reference or None,
                 reference_requirement=reference_requirements.get(frame.index),
             )
+            if resolved.applied != reference:
+                preflight = replace(
+                    preflight,
+                    request=replace(preflight.request, image_url=resolved.applied),
+                    reference_audit=replace(preflight.reference_audit, applied=resolved.applied),
+                )
+            preflight_by_index[frame.index] = preflight
+            if resolved.proof_media is not None:
+                proof_media_by_index[frame.index] = resolved.proof_media
         except VideoGenError as exc:
             preflight_errors.append(f"frame {frame.index}: {exc}")
     if preflight_errors:
@@ -410,11 +447,15 @@ def generate_clips(
                 "reference_audit": asdict(preflight.reference_audit),
             },
         )
+        if frame.index in proof_media_by_index:
+            result.extra["proof_media"] = proof_media_by_index[frame.index]
         audit = {
             "requested_parameters": preflight.requested_parameters,
             "applied_parameters": preflight.applied_parameters,
             "reference_audit": asdict(preflight.reference_audit),
         }
+        if frame.index in proof_media_by_index:
+            audit["proof_media"] = proof_media_by_index[frame.index]
         result.request_fingerprint = _request_fingerprint(
             provider=provider,
             model=vm.model,
