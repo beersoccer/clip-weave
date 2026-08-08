@@ -1,4 +1,6 @@
-# clip-weave — Rule Guard 有效性收缩 + T2V 逐帧路由设计规格
+# clip-weave — Rule Guard 有效性收缩 + T2V 逐帧路由设计规格（历史，2026-07-31）
+
+> 已实现或已被后续架构取代；当前设计见[架构](../../../architecture.md)。
 
 > 版本：v1.0 | 日期：2026-07-31
 > HF 源码核对基线：`/Users/beersoccer/workspace/hyperframes`

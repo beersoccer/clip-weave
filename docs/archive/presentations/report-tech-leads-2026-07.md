@@ -1,4 +1,5 @@
 ---
+<!-- 历史汇报材料：2026-07。当前架构与路线图请读 ../architecture.md 与 ../production-quality-loop.md。 -->
 marp: true
 theme: default
 paginate: true
@@ -508,4 +509,3 @@ HF Step 5(写合成)是最耗时环节,通过 `frame-packets.mjs` 并行化:
 **意义:每个子 agent 上下文完整但窗口极小,并行执行,遗忘风险最低。**
 
 这正是 Rule Guard 的设计参考 —— 与其依赖记忆,不如每次重新加载。
-
