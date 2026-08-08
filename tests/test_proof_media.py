@@ -73,7 +73,7 @@ def test_ledger_write_failure_deletes_newly_uploaded_object(tmp_path: Path, monk
     source.write_text("proof")
     deleted: list[str] = []
     monkeypatch.setattr(proof_media.requests, "put", lambda *args, **kwargs: _Response())
-    monkeypatch.setattr(proof_media.requests, "delete", lambda url: deleted.append(url) or _Response())
+    monkeypatch.setattr(proof_media.requests, "delete", lambda url, *, headers: deleted.append(url) or _Response())
     monkeypatch.setattr(proof_media, "_write_ledger_atomically", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
     store = HttpPutProofMediaStore.from_environment(_environment())
 
@@ -87,7 +87,7 @@ def test_delete_failure_does_not_hide_ledger_write_failure(tmp_path: Path, monke
     source = tmp_path / "reference.txt"
     source.write_text("proof")
     monkeypatch.setattr(proof_media.requests, "put", lambda *args, **kwargs: _Response())
-    monkeypatch.setattr(proof_media.requests, "delete", lambda url: _Response(OSError("delete denied")))
+    monkeypatch.setattr(proof_media.requests, "delete", lambda url, *, headers: _Response(OSError("delete denied")))
     monkeypatch.setattr(proof_media, "_write_ledger_atomically", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
     store = HttpPutProofMediaStore.from_environment(_environment())
 
@@ -140,7 +140,7 @@ def test_directory_fsync_failure_after_replace_does_not_delete_recorded_object(
             raise OSError("directory fsync failed")
 
     monkeypatch.setattr(proof_media.requests, "put", lambda *args, **kwargs: _Response())
-    monkeypatch.setattr(proof_media.requests, "delete", lambda url: deleted.append(url) or _Response())
+    monkeypatch.setattr(proof_media.requests, "delete", lambda url, *, headers: deleted.append(url) or _Response())
     monkeypatch.setattr(proof_media.os, "fsync", fake_fsync)
     ledger = tmp_path / "ledger.json"
     store = HttpPutProofMediaStore.from_environment(_environment())
@@ -198,6 +198,58 @@ def test_materializes_gs_uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     reference = store.materialize(source, scheme="gs", sha256=hashlib.sha256(b"proof").hexdigest())
 
     assert reference.uri == f"gs://proof-bucket/{hashlib.sha256(b'proof').hexdigest()}.bin"
+
+
+def test_delete_copies_configured_headers_for_compensation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "reference.txt"
+    source.write_text("proof")
+    delete_headers: list[dict[str, str]] = []
+    environment = _environment(PROOF_MEDIA_HTTPS_UPLOAD_HEADERS_JSON=json.dumps({"Authorization": "Bearer private-token"}))
+    monkeypatch.setattr(proof_media.requests, "put", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        proof_media.requests,
+        "delete",
+        lambda url, *, headers: delete_headers.append(headers) or _Response(),
+    )
+    monkeypatch.setattr(proof_media, "_write_ledger_atomically", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(VideoGenError, match="disk full"):
+        materialize_local_reference(
+            source,
+            tmp_path / "ledger.json",
+            HttpPutProofMediaStore.from_environment(environment),
+            "https",
+        )
+
+    assert delete_headers == [{"Authorization": "Bearer private-token"}]
+
+
+@pytest.mark.parametrize("operation", ["put", "delete"])
+def test_request_errors_are_converted_to_redacted_video_gen_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    source = tmp_path / "reference.txt"
+    source.write_text("proof")
+    secret = "very-secret-token"
+    environment = _environment(PROOF_MEDIA_HTTPS_UPLOAD_HEADERS_JSON=json.dumps({"Authorization": secret}))
+    store = HttpPutProofMediaStore.from_environment(environment)
+    failure = proof_media.requests.exceptions.InvalidHeader(f"Authorization: {secret}")
+
+    if operation == "put":
+        monkeypatch.setattr(proof_media.requests, "put", lambda *args, **kwargs: (_ for _ in ()).throw(failure))
+        action = lambda: store.materialize(source, scheme="https", sha256=hashlib.sha256(b"proof").hexdigest())
+    else:
+        monkeypatch.setattr(proof_media.requests, "delete", lambda *args, **kwargs: (_ for _ in ()).throw(failure))
+        action = lambda: store.delete(
+            proof_media.MaterializedReference(str(source), "a" * 64, ".txt", "https://cdn.example/reference.txt", "https", True)
+        )
+
+    with pytest.raises(VideoGenError) as exc:
+        action()
+
+    assert secret not in str(exc.value)
+    assert "Authorization" not in str(exc.value)
+    assert "upload.example" not in str(exc.value)
 
 
 def test_configuration_error_does_not_leak_upload_headers() -> None:

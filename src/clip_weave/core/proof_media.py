@@ -75,9 +75,12 @@ class HttpPutProofMediaStore:
         upload_url = _expand_template(config.upload_url_template, sha256=sha256, suffix=suffix)
         headers = dict(config.headers)
         headers["Content-Type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        with path.open("rb") as media:
-            response = requests.put(upload_url, data=media, headers=headers)
-        response.raise_for_status()
+        try:
+            with path.open("rb") as media:
+                response = requests.put(upload_url, data=media, headers=headers)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise VideoGenError(f"proof media {scheme}: upload request failed") from exc
         return MaterializedReference(
             source=str(path),
             sha256=sha256,
@@ -94,8 +97,11 @@ class HttpPutProofMediaStore:
             sha256=reference.sha256,
             suffix=reference.suffix,
         )
-        response = requests.delete(upload_url)
-        response.raise_for_status()
+        try:
+            response = requests.delete(upload_url, headers=dict(config.headers))
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise VideoGenError(f"proof media {reference.scheme}: delete request failed") from exc
 
     def _configuration(self, scheme: str) -> _SchemeConfig:
         try:
