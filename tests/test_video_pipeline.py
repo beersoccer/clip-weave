@@ -141,6 +141,14 @@ def test_dry_run_never_builds_a_model_or_checks_provider_capabilities(tmp_path, 
     assert not (tmp_path / "renders").exists()
 
 
+def test_dry_run_reports_provider_capability_check_was_not_performed(tmp_path):
+    reports: list[str] = []
+
+    _run(tmp_path, dry_run=True, report=reports.append)
+
+    assert any("provider capability check not performed" in report for report in reports)
+
+
 def test_no_frames_raises(tmp_path):
     body = "---\nformat: 1920x1080\n---\n\nprose only\n"
     with pytest.raises(VideoGenError, match="no frames parsed"):

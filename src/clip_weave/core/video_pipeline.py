@@ -323,6 +323,7 @@ def generate_clips(
         )
 
     if dry_run:
+        report("[dry-run] provider capability check not performed")
         results = []
         for frame in selected:
             prompt = prompt_for(frame)
