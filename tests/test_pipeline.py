@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from clip_weave.pipeline import run, guard
+from clip_weave.core import render_path as rp
 
 
 def test_run_creates_brief_md(tmp_path):
@@ -18,6 +19,25 @@ def test_run_creates_brief_md(tmp_path):
     assert (project_dir / "BRIEF.md").exists()
     brief_text = (project_dir / "BRIEF.md").read_text()
     assert "小米SU7" in brief_text
+
+
+def test_run_persists_profile_before_delegating(tmp_path):
+    videos_dir = tmp_path / "videos"
+
+    def assert_profile_at_delegation(project_dir):
+        assert rp.resolve(project_dir)[0] == "t2v_brand_film"
+
+    with patch("clip_weave.pipeline.factory_setup"), patch(
+        "clip_weave.pipeline.print_delegation_instructions",
+        side_effect=assert_profile_at_delegation,
+    ):
+        run(
+            user_input="品牌视频",
+            project_name="t2v-proj",
+            videos_dir=videos_dir,
+            message="test",
+            production_profile="t2v_brand_film",
+        )
 
 
 def test_run_routes_url_to_product_launch(tmp_path):

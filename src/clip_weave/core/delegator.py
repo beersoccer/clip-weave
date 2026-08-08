@@ -12,10 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 def build_delegation_prompt(project_dir: Path) -> str:
-    """Return the prompt to pass to Claude Code to start the HF workflow."""
+    """Return the prompt for the project-selected production path."""
     brief_path = project_dir / "BRIEF.md"
     if not brief_path.exists():
         raise FileNotFoundError(f"BRIEF.md not found at {brief_path}")
+
+    from clip_weave.core import render_path as rp
+
+    profile, _ = rp.resolve(project_dir)
+    if profile == "t2v_brand_film":
+        return (
+            f"Prepare and review `{project_dir / 'STORYBOARD.md'}` for the T2V brand-film project at "
+            f"`{project_dir}`. Do not add frame-level render fields. Then run "
+            f"`uv run python -m clip_weave gen-video {project_dir / 'STORYBOARD.md'} "
+            "--provider doubao --prompts-only` before any paid generation."
+        )
 
     workflow = _read_workflow(brief_path)
     return (
@@ -28,6 +39,21 @@ def build_delegation_prompt(project_dir: Path) -> str:
 def print_delegation_instructions(project_dir: Path) -> None:
     """Print human-readable handoff instructions to stdout."""
     brief_path = project_dir / "BRIEF.md"
+    from clip_weave.core import render_path as rp
+
+    profile, _ = rp.resolve(project_dir)
+    if profile == "t2v_brand_film":
+        print(f"\n{'='*60}")
+        print("clip-weave: T2V brand-film project ready")
+        print(f"{'='*60}")
+        print(f"  Project dir : {project_dir}")
+        print(f"  Profile     : {profile}")
+        print(f"  BRIEF.md    : {brief_path}")
+        print("\nNext step:")
+        print(f"  {build_delegation_prompt(project_dir)}")
+        print(f"{'='*60}\n")
+        return
+
     workflow = _read_workflow(brief_path)
     project_name = project_dir.name
 

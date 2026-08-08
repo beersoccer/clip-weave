@@ -31,12 +31,12 @@ def cli():
 @click.option("--length", default="30s", help="Video length (e.g. 15s, 30s, 60s)")
 @click.option("--workflow", default=None, help="Force a specific HF workflow")
 @click.option(
-    "--render",
-    type=click.Choice(["html", "t2v", "ask"]),
+    "--profile",
+    type=click.Choice(["html_launch", "t2v_brand_film", "ask"]),
     default="ask",
-    help="Renderer: html (HF compositions) | t2v (video models) | ask (default)",
+    help="Production profile: html_launch | t2v_brand_film | ask (default)",
 )
-def run_cmd(url, message, project, videos_dir, length, workflow, render):
+def run_cmd(url, message, project, videos_dir, length, workflow, profile):
     """Route a video request and prepare the HF project for delegation."""
     cfg = load_config()
     project_name = project or _derive_project_name(url, message)
@@ -44,6 +44,10 @@ def run_cmd(url, message, project, videos_dir, length, workflow, render):
     if workflow:
         user_input = f"{workflow} {user_input}"
 
+    production_profile = _choose_production_profile(
+        Path(videos_dir) / project_name,
+        profile,
+    )
     project_dir = pipeline_run(
         user_input=user_input,
         project_name=project_name,
@@ -51,42 +55,39 @@ def run_cmd(url, message, project, videos_dir, length, workflow, render):
         message=message,
         length=length,
         cfg=cfg,
+        production_profile=production_profile,
     )
     click.echo(f"Project ready: {project_dir}")
-    _settle_render_path(project_dir, render)
 
 
-def _settle_render_path(project_dir: Path, choice: str) -> str:
-    """Make the HTML-vs-T2V decision explicit, then remember it in BRIEF.md."""
+def _choose_production_profile(project_dir: Path, choice: str) -> str:
+    """Choose the profile before project setup and delegation writes the BRIEF."""
     from clip_weave.core import render_path as rp
 
     if choice != "ask":
-        rp.persist(project_dir, choice)  # type: ignore[arg-type]
-        click.echo(f"Renderer: {choice} (written to BRIEF.md)")
+        click.echo(f"Production Profile: {choice}")
         return choice
 
     existing, source = rp.resolve(project_dir)
     if existing:
-        click.echo(f"Renderer: {existing} (from {source})")
+        click.echo(f"Production Profile: {existing} (from {source})")
         return existing
 
     click.echo(
-        "\n渲染路径未指定。\n"
-        "  html  HF 合成（默认）— 精确文字/品牌色/数据图表，可复现，无推理费用\n"
-        "  t2v   视频大模型     — 写实镜头、真实光影，按秒计费，有随机性\n"
-        "  两者混排：项目默认选一个，个别帧在 STORYBOARD.md 上写 `render: html`/`render: t2v` 覆盖"
+        "\nProduction Profile 未指定。\n"
+        "  html_launch     HyperFrames 成片 — 精确文字/品牌色/数据图表\n"
+        "  t2v_brand_film  生成式品牌片 — 写实镜头；当前为逐镜头视频生成路径\n"
+        "  每个项目只能选择一个主生产链。"
     )
     if not sys.stdin.isatty():
-        click.echo(f"非交互环境，按默认 {rp.DEFAULT} 处理（用 --render 显式指定）")
-        rp.persist(project_dir, rp.DEFAULT)
+        click.echo(f"非交互环境，按默认 {rp.DEFAULT} 处理（用 --profile 显式指定）")
         return rp.DEFAULT
 
     picked = click.prompt(
-        "选择渲染路径", type=click.Choice(list(rp.VALID)), default=rp.DEFAULT, show_default=True
+        "选择 Production Profile", type=click.Choice(list(rp.PROFILES)), default=rp.DEFAULT, show_default=True
     )
-    rp.persist(project_dir, picked)
-    click.echo(f"已写入 BRIEF.md：render: {picked}（下次不再询问，改这一行即可切换）")
-    if picked == "t2v":
+    click.echo(f"已选择 Production Profile：{picked}（将写入 BRIEF.md）")
+    if picked == "t2v_brand_film":
         click.echo(
             f"下一步：uv run python -m clip_weave gen-video {project_dir}/STORYBOARD.md "
             "--provider doubao --dry-run"
@@ -98,11 +99,20 @@ def _settle_render_path(project_dir: Path, choice: str) -> str:
 @click.argument("project_dir")
 def guard_cmd(project_dir):
     """Run Rule Guard pre-flight on compositions in PROJECT_DIR."""
+    from clip_weave.core import render_path as rp
+    from clip_weave.core.storyboard import parse_storyboard
+
     p = Path(project_dir)
     compositions_dir = p / "compositions"
     if not compositions_dir.exists():
         click.echo(f"No compositions/ directory found in {p}", err=True)
         sys.exit(1)
+    storyboard = p / "STORYBOARD.md"
+    if storyboard.is_file():
+        try:
+            rp.validate_frames([frame.meta for frame in parse_storyboard(storyboard).frames])
+        except rp.ProfileError as exc:
+            raise click.UsageError(str(exc)) from exc
     ok = pipeline_guard(compositions_dir, project_dir=p)
     if ok:
         click.echo("Rule Guard: all clear")
@@ -228,7 +238,6 @@ def route_cmd(message, url, no_semantic, compare):
     is_flag=True,
     help="Write/refresh T2V-PROMPTS.md and stop (no generation, no cost)",
 )
-@click.option("--yes", is_flag=True, help="Skip the renderer confirmation prompt")
 def gen_video_cmd(
     storyboard,
     provider,
@@ -248,7 +257,6 @@ def gen_video_cmd(
     concat,
     regenerate_prompts,
     prompts_only,
-    yes,
 ):
     """Generate one AI video clip per frame of STORYBOARD (a STORYBOARD.md).
 
@@ -263,16 +271,17 @@ def gen_video_cmd(
     storyboard_path = Path(storyboard)
     project_dir = storyboard_path.parent
 
-    # The renderer choice belongs to the user — surface a conflict, never override it.
-    chosen, source = rp.resolve(project_dir)
-    if chosen == "html" and not yes and not prompts_only:
-        click.echo(f"BRIEF.md 指定 render: html（{source}）— 该项目的画面本应由 HF 合成。")
-        if not dry_run and sys.stdin.isatty() and not click.confirm("仍然用 T2V 生成？", default=False):
-            click.echo("已取消。要长期切换：把 BRIEF.md 的 render: 改成 t2v。")
-            return
-    elif chosen is None and not yes:
-        click.echo("提示：BRIEF.md 未写 render:，本次按 t2v 执行。"
-                   "用 `run --render t2v` 或手写 `render: t2v` 可固定下来。")
+    profile, source = rp.resolve(project_dir)
+    if profile is None:
+        raise click.UsageError(
+            "gen-video requires BRIEF.md to select production_profile: t2v_brand_film; "
+            "create the project with `run --profile t2v_brand_film` first."
+        )
+    if rp.engine(profile) != "t2v":
+        raise click.UsageError(
+            f"gen-video is unavailable for production_profile: {profile} ({source}); "
+            "use the HyperFrames workflow for html_launch projects."
+        )
 
     doc, prompts_path, created = load_or_create(
         storyboard_path,
@@ -308,7 +317,8 @@ def gen_video_cmd(
     if flagged:
         click.echo(
             f"  needs_review: frame {', '.join(map(str, flagged))} 以图文/数据为主，未能自动"
-            "改写（未配置网关）— 视频模型渲染文字不可靠，建议这些帧留在 HTML 路径"
+            "改写（未配置网关）— 视频模型渲染文字不可靠；请修订提示词，或重新选择整个项目的 "
+            "Production Profile"
         )
     if prompts_only:
         click.echo("--prompts-only：未调用任何模型。编辑该文件后再跑一次即可生效。")
@@ -333,7 +343,6 @@ def gen_video_cmd(
             provider=provider,
             out_dir=out_dir,
             frames=frame_list,
-            render_default=chosen,
             resolution=resolution,
             ratio=ratio,
             duration=duration,

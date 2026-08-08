@@ -14,36 +14,28 @@
 
 品牌色和文字排版必须准确的镜头**不要**交给 T2V —— 模型无法保证十六进制色值与字形。
 图文/数据意图的帧会先尝试由 LLM 网关改写成可拍摄镜头；改写失败或网关未配置时，
-`T2V-PROMPTS.md` 才会把这类帧标记 `needs_review`，建议留在 HTML 路径。
+`T2V-PROMPTS.md` 会把这类帧标记 `needs_review`。此时应修订提示词，或重新选择整个项目的
+Production Profile；不能把单个镜头改走 HTML。
 
 ## 路径在项目之初决定一次
 
-写进 `BRIEF.md` frontmatter，不是逐帧决定，只有 `html` / `t2v` 两个值，没有 `mixed`：
+写进 `BRIEF.md` frontmatter，不是逐帧决定：
 
 ```yaml
 ---
 workflow: product-launch-video
-render: t2v       # html（默认）| t2v
+production_profile: t2v_brand_film
 ---
 ```
 
-`run --render ask`（默认）会在缺失时问一次并持久化，同一项目不重复询问；也可以直接
-`run --render t2v` 跳过询问。也接受 `render_path:` 作为别名。非法值会告警并视为未设置。
+`run --profile ask`（默认）会在缺失时问一次并持久化，同一项目不重复询问；也可以直接
+`run --profile t2v_brand_film` 跳过询问。profile 只能是 `html_launch` 或
+`t2v_brand_film`；旧项目级 `render: html|t2v` 可读取以便迁移，但新的写入只使用
+`production_profile`。
 
-混排通过**逐帧覆盖**表达：项目默认选一个，个别镜头在帧上写同名的 `render:` 覆盖它——
-覆盖用的是与项目级完全相同的词表，不是单独的一套：
-
-```markdown
-## Frame 2 — 实拍开场
-- scene: 城市夜景中一辆红色轿车驶过湿滑路面
-- render: t2v
-```
-
-未标注或取值无法识别的帧跟随项目默认。
-
-`gen-video` 会核对 `BRIEF.md` 的 `render:` 和当前操作是否一致：若 `render: html` 却在跑
-`gen-video`，会打印矛盾提示并要求确认（`--yes` 跳过确认；非交互环境不询问，按用户已设置的
-值继续）。
+不支持按镜头选择不同 profile，也不支持 HTML/T2V 自由混排。`STORYBOARD.md` 中的旧
+`render:` / `render_path:` 字段会被拒绝。`gen-video` 只接受 `t2v_brand_film`，在
+`html_launch` 项目中会在创建提示词前失败。
 
 ## 提示词是一个可编辑的文件，不是即时拼装
 
@@ -109,13 +101,10 @@ uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider do
 产物落在 `<storyboard 目录>/renders/ai-clips/<provider>/`：编号片段、`manifest.json`
 （含每一帧的 provider、模型、状态），`--concat` 时的 `full.mp4`。
 
-## 混排必须在 FFmpeg 层
+## 当前合成边界
 
-用逐帧 `render:` 覆盖混排的项目里，动效镜头（HTML）与写实镜头（T2V）并存时，**在 FFmpeg
-层合流，不要把 T2V 片段当 `<video>` 塞进 HTML 合成。** 原因：Chrome 无法同时 seek 多个 `<video>`
-（解码器耗尽），视频密集的合成会退化为单 worker 甚至超时。另外 `<video>` 必须是
-`index.html` 根的直接子元素，放进 sub-composition 会渲染黑屏（Rule Guard § 7 检查的
-正是这条）。
+`t2v_brand_film` 先生成全部 storyboard 片段，再用 FFmpeg 合流。未来的确定性文字、logo、
+UI、CTA、字幕与音频完成层会在 FFmpeg 总装配阶段实现；当前不提供逐镜头 HTML/T2V 混排。
 
 ## 提示词的构造方式
 

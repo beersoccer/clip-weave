@@ -1,4 +1,6 @@
-# clip-weave 技术选型分析
+# clip-weave 技术选型分析（历史记录，2026-07）
+
+> 本文包含已失效的阶段划分、模型比较、价格和“远期”判断，不代表当前方案。当前决策见 [架构](../architecture.md) 与 [生产质量流程](../production-quality-loop.md)。
 
 > 文档版本：v6.0 | 更新日期：2026-07-27  
 > 最终架构方案见 `architecture.md`

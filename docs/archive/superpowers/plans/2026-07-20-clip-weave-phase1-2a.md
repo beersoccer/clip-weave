@@ -1,4 +1,6 @@
-# clip-weave Phase 1 + 2a Implementation Plan
+# clip-weave Phase 1 + 2a Implementation Plan（历史，2026-07-20）
+
+> 已完成/废弃的实施计划；不作为当前待办。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

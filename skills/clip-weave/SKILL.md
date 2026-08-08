@@ -54,7 +54,7 @@ Apply the first matching row:
 
 | State | Action |
 |-------|--------|
-| `videos/<project>/BRIEF.md` exists | Read `workflow` and `flow`; run `/hyperframes` directly; ask no intent questions |
+| `videos/<project>/BRIEF.md` exists | Read `production_profile` first: `html_launch` runs its HyperFrames workflow; `t2v_brand_film` prepares/reviews STORYBOARD then starts `gen-video`; ask no intent questions |
 | `hyperframes.json` or `STORYBOARD.md` exists, no BRIEF.md | Infer workflow from artifacts; resume from HF project state |
 | User provides a pre-filled `BRIEF.md` file | Validate frontmatter; proceed to § 4 (Project Setup) |
 | Fresh request | Run intent interview (§ 2) |
@@ -154,11 +154,11 @@ npx hyperframes capture "<URL>" -o "$PROJECT_DIR/capture"
 Write `BRIEF.md` to `$PROJECT_DIR/BRIEF.md` using the confirmed intent interview answers.
 Template: `references/brief-template.md`.
 
-**渲染路径也在这一步问一次**（见 § 8），或者通过 CLI 一并决定：
+**Production Profile 也在这一步确定一次**（见 § 8），或者通过 CLI 一并决定：
 
 ```bash
-uv run python -m clip_weave run --message "核心信息" --url "<URL>" --render ask
-# --render html | t2v | ask（默认 ask：已设置过就复用，没设置过则询问）
+uv run python -m clip_weave run --message "核心信息" --url "<URL>" --profile ask
+# --profile html_launch | t2v_brand_film | ask（默认 ask：已设置过就复用，没设置过则询问）
 ```
 
 ## 5. Asset Matcher (if capture/ has assets)
@@ -183,18 +183,16 @@ See `references/setup.md` for environment variable reference and degradation tab
 The filter step (project_factory.py) removes noise assets automatically after capture:
 favicons, QR codes, WhatsApp icons, hash-named SVG icon sprites, and images > 1.5 MB.
 
-## 6. Delegate to HF workflow
+## 6. Follow the selected Production Profile
 
-Once `BRIEF.md` exists, hand off to HF:
+Read `production_profile` in `BRIEF.md` before delegating:
 
-```bash
-# Activate the routed workflow skill — HF reads BRIEF.md and runs autonomously
-/<workflow-name>
-# e.g.: /product-launch-video, /faceless-explainer, /motion-graphics
-```
+- `html_launch`：交给已路由的 HyperFrames workflow，例如 `/<workflow-name>`。
+- `t2v_brand_film`：准备并审阅 `STORYBOARD.md`（不得有帧级 `render:`/`render_path:`），再先运行
+  `uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider doubao --prompts-only`。
 
-clip-weave does NOT re-implement composition building, storyboard generation,
-frame rendering, lint, check, or render — these are entirely owned by HF skills.
+clip-weave 不重造 HyperFrames 的 composition、lint、check 或 render；但 T2V 项目不委托
+HyperFrames 生成完整成片，而是经 `gen-video` 进入生成式视频生产路径。
 
 ## 7. Rule Guard (pre-assembly pre-flight)
 
@@ -206,7 +204,9 @@ frame rendering, lint, check, or render — these are entirely owned by HF skill
 uv run python -m clip_weave guard "$PROJECT_DIR"
 ```
 
-**Rule Guard 只检查一条规则**，因为只有这一条经核对确认 HF 原生能力覆盖不到：
+`guard` 先校验 `STORYBOARD.md`（若存在）：禁止任何大小写形式的帧级 `render:` 或
+`render_path:`，因为 Production Profile 只能在项目级选择。随后它检查一条与 HyperFrames
+装配相关的确定性错误：
 
 - `media_in_subcomposition` —— `<video>`/`<audio>` 必须是 `index.html` 根的直接子元素。
   放在 sub-composition 里的媒体永不被 seek/解码，渲染为黑屏/白屏。
@@ -229,7 +229,7 @@ HF 的真实语义与直觉相反（豁免 timeline 外的 `gsap.set()`，警告
 npx hyperframes check          # 全项目，完整覆盖
 ```
 
-## 8. 渲染路径：HTML 还是 T2V
+## 8. Production Profile：HTML 还是 T2V
 
 HTML 路径（HF skill 写 composition → 逐帧渲染）适合图形、文字、UI、图表 —— 确定性、
 零推理费用，而且是唯一能把字体、品牌色和数据渲染准确的路径。写实画面、实景、镜头运动
@@ -240,25 +240,17 @@ HTML 路径（HF skill 写 composition → 逐帧渲染）适合图形、文字�
 ```yaml
 ---
 workflow: product-launch-video
-render: html      # html（默认）| t2v
+production_profile: html_launch  # html_launch（默认）| t2v_brand_film
 ---
 ```
 
-`run` 命令会处理这个决策（`--render ask` 是默认值）：已设置过就复用并回显来源；没设置过、
+`run` 命令会处理这个决策（`--profile ask` 是默认值）：已设置过就复用并回显来源；没设置过、
 且在交互终端里，会打印两个选项的取舍并用 `click.prompt` 问一次；非交互环境直接落到默认值
-`html` 并说明如何覆盖。选定后写回 `BRIEF.md`，同一项目不会再问第二次。
+`html_launch` 并说明如何覆盖。选定后写回 `BRIEF.md`，同一项目不会再问第二次。
 
-项目级只有 `html` / `t2v` 两个值，没有 `mixed`。混排通过**逐帧覆盖**表达——项目默认选一个，
-个别镜头在帧上写同名的 `render:` 覆盖它：
-
-```markdown
-## Frame 2 — 实拍开场
-- scene: 城市夜景中一辆红色轿车驶过湿滑路面
-- render: t2v
-```
-
-帧级 `render:` 与项目级用的是同一套词表（`html` | `t2v`），未标注或取值无法识别的帧跟随
-项目默认。
+每个项目只有 `html_launch` / `t2v_brand_film` 两个 profile。不能在 `STORYBOARD.md` 写
+`render:` 或 `render_path:` 覆盖单个镜头，也不支持 HTML/T2V 自由混排；这类旧字段会被拒绝，
+而不是静默忽略。要改变生产路径，应在项目级重新选择 profile。
 
 T2V 提示词不是即时拼装的，而是先落成 `T2V-PROMPTS.md` —— **那才是用户直接编辑的文件**：
 
@@ -268,14 +260,14 @@ uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider do
 uv run python -m clip_weave gen-video "$PROJECT_DIR/STORYBOARD.md" --provider doubao --concat
 ```
 
-若 `BRIEF.md` 写的是 `render: html` 却在跑 `gen-video`，命令会提示这个矛盾并要求确认
-（`--yes` 跳过确认，非交互环境不询问）。
+`gen-video` 只接受 `production_profile: t2v_brand_film`；`html_launch` 项目会在创建提示词前
+被拒绝。若图文/数据意图无法改写为可拍摄镜头，应修订提示词，或重新选择整个项目的 profile。
 
 图文/数据意图的帧（"六张卡片弹入"、"902 从零计数爆炸放大"这类）不能确定性地转成可拍摄
 镜头，所以经同一个 LLM 网关做语义改写——把图形意图换成保留画面主旨的实拍镜头描述（镜头、
 光线、材质），绝不提卡片/文字/UI。改写成功会在 `T2V-PROMPTS.md` 标一行改写说明，建议生成前
-过一遍；网关未配置或调用失败时才退回旧行为——标记 `needs_review` 并建议留在 HTML 路径。
-provider 选型、时长约束、GCP project 配置、混排注意事项见 `references/t2v-guide.md`。
+过一遍；网关未配置或调用失败时才标记 `needs_review`，由 Agent 要求修订提示词或调整整个项目
+profile。provider 选型、时长约束和 GCP project 配置见 `references/t2v-guide.md`。
 
 ## Resume table
 
@@ -284,7 +276,8 @@ provider 选型、时长约束、GCP project 配置、混排注意事项见 `ref
 | No `BRIEF.md`, no project | § 2 (intent interview) |
 | Pre-filled `BRIEF.md` uploaded | § 4 (project setup) |
 | `hyperframes.json` exists, no `BRIEF.md` | § 4 (project setup, skip init) |
-| `BRIEF.md` exists | `/hyperframes` directly |
+| `BRIEF.md` exists + `html_launch` | 直接运行对应的 HyperFrames workflow |
+| `BRIEF.md` exists + `t2v_brand_film` | 准备/审阅 STORYBOARD，再从 `gen-video --prompts-only` 开始 |
 | Composition written, Rule Guard not run | § 7 (guard) |
 | Guard passed, check/render pending | continue in HF workflow |
-| `BRIEF.md` 的 `render:` 为 `t2v` | § 8（渲染路径） |
+| `BRIEF.md` 的 `production_profile:` 为 `t2v_brand_film` | § 8（Production Profile） |

@@ -1,4 +1,6 @@
-# HyperFrames 深度分析
+# HyperFrames 深度分析（历史源码调研，2026-07）
+
+> 此为外部框架的长篇研究记录。当前项目边界与实际调用方式见[架构](../architecture.md)。
 
 > 2026-07-24 初版 | 2026-07-29 更新 §2（渲染引擎原理）
 > 基于 ~/workspace/hyperframes/ 源码（packages/ + skills/）全量阅读

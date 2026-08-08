@@ -20,6 +20,9 @@ workflow: product-launch-video   # 产品/品牌宣传视频（有网站 URL）
 flow: automation    # automation = 全自动执行 | companion = 与用户共创
 storyboard: no      # no = 全自动（autonomous）| yes = 逐步审批分镜（collaborative）
 
+# * Production Profile（二选一；决定整个项目的生产链）
+production_profile: html_launch  # html_launch = HyperFrames 成片 | t2v_brand_film = 生成式品牌片
+
 # * 核心消息（视频要传达的一句话）
 message: ""
 

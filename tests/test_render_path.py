@@ -1,9 +1,4 @@
-"""Tests for the project-level render-path decision.
-
-The path is the user's choice, made once per project in BRIEF.md. A frame can
-override it with its own `render:` line — same `html | t2v` vocabulary at both
-levels, no separate `mixed` value or `visual_type` keyword.
-"""
+"""Tests for the project-level Production Profile contract."""
 
 import logging
 
@@ -17,104 +12,95 @@ def _brief(tmp_path, body: str, name: str = "BRIEF.md"):
     return tmp_path
 
 
-# ── resolve ───────────────────────────────────────────────────────────────────
-
 def test_unset_when_there_is_no_brief(tmp_path):
     assert rp.resolve(tmp_path) == (None, "unset")
 
 
-def test_unset_when_brief_has_no_render_key(tmp_path):
-    _brief(tmp_path, "---\nworkflow: product-launch-video\n---\n\n## Intent\n")
+def test_unset_when_brief_has_no_profile(tmp_path):
+    _brief(tmp_path, "---\nworkflow: product-launch-video\n---\n")
     assert rp.resolve(tmp_path) == (None, "unset")
 
 
-@pytest.mark.parametrize("value", ["html", "t2v"])
-def test_every_valid_value_resolves(tmp_path, value):
-    _brief(tmp_path, f"---\nworkflow: x\nrender: {value}\n---\n")
-    path, source = rp.resolve(tmp_path)
-    assert path == value
-    assert source == "BRIEF.md:render"
+@pytest.mark.parametrize("profile", ["html_launch", "t2v_brand_film"])
+def test_profile_resolves_from_canonical_frontmatter(tmp_path, profile):
+    _brief(tmp_path, f"---\nproduction_profile: {profile}\n---\n")
+    assert rp.resolve(tmp_path) == (profile, "BRIEF.md:production_profile")
 
 
-def test_render_path_alias_is_accepted(tmp_path):
-    _brief(tmp_path, "---\nrender_path: t2v\n---\n")
-    path, source = rp.resolve(tmp_path)
-    assert path == "t2v"
-    assert source == "BRIEF.md:render_path"
+def test_profile_is_case_insensitive_and_dequoted(tmp_path):
+    _brief(tmp_path, '---\nproduction_profile: "T2V_BRAND_FILM"\n---\n')
+    assert rp.resolve(tmp_path)[0] == "t2v_brand_film"
 
 
-def test_value_is_case_insensitive_and_dequoted(tmp_path):
-    _brief(tmp_path, '---\nrender: "T2V"\n---\n')
-    assert rp.resolve(tmp_path)[0] == "t2v"
+def test_profile_accepts_a_yaml_inline_comment(tmp_path):
+    _brief(tmp_path, "---\nproduction_profile: html_launch  # default profile\n---\n")
+    assert rp.resolve(tmp_path) == ("html_launch", "BRIEF.md:production_profile")
 
 
-def test_lowercase_brief_filename_is_read(tmp_path):
-    """`resolve()` tries "BRIEF.md" then "brief.md" — both must be readable.
-
-    On a case-insensitive filesystem (macOS default) the two names collide, so
-    this only proves the lowercase branch exists, not that it is reached first.
-    `test_persist_ignores_a_lowercase_brief` below exercises the same branch from
-    the write side, where the collision does not mask anything.
-    """
-    _brief(tmp_path, "---\nrender: t2v\n---\n", name="brief.md")
-    path, source = rp.resolve(tmp_path)
-    assert path == "t2v"
-    assert source in ("BRIEF.md:render", "brief.md:render")
-
-
-def test_invalid_value_warns_and_stays_unset(tmp_path, caplog):
-    _brief(tmp_path, "---\nrender: veo\n---\n")
+def test_legacy_render_is_read_with_a_migration_warning(tmp_path, caplog):
+    _brief(tmp_path, "---\nrender: t2v\n---\n")
     with caplog.at_level(logging.WARNING, logger="clip_weave.core.render_path"):
-        path, source = rp.resolve(tmp_path)
-    assert path is None
-    assert source == "unset"
+        profile, source = rp.resolve(tmp_path)
+    assert (profile, source) == ("t2v_brand_film", "BRIEF.md:render")
+    assert "production_profile" in caplog.text
+
+
+def test_persist_migrates_lowercase_legacy_render_path(tmp_path):
+    _brief(tmp_path, "---\nrender_path: t2v\nworkflow: x\n---\n", name="brief.md")
+
+    assert rp.persist(tmp_path, "html_launch") is True
+
+    text = (tmp_path / "brief.md").read_text(encoding="utf-8")
+    assert "production_profile: html_launch" in text
+    assert "render_path:" not in text
+    assert rp.resolve(tmp_path) == ("html_launch", "brief.md:production_profile")
+
+
+def test_lowercase_legacy_render_path_reports_its_real_source(tmp_path):
+    _brief(tmp_path, "---\nrender_path: t2v\n---\n", name="brief.md")
+
+    assert rp.resolve(tmp_path) == ("t2v_brand_film", "brief.md:render_path")
+
+
+def test_invalid_profile_warns_and_stays_unset(tmp_path, caplog):
+    _brief(tmp_path, "---\nproduction_profile: veo\n---\n")
+    with caplog.at_level(logging.WARNING, logger="clip_weave.core.render_path"):
+        assert rp.resolve(tmp_path) == (None, "unset")
     assert "veo" in caplog.text
 
 
-def test_mixed_value_is_rejected(tmp_path, caplog):
-    """`mixed` is no longer a valid project-level value — mixing is expressed by
-    per-frame `render:` overrides on top of a single html-or-t2v project default."""
-    _brief(tmp_path, "---\nrender: mixed\n---\n")
-    with caplog.at_level(logging.WARNING, logger="clip_weave.core.render_path"):
-        path, source = rp.resolve(tmp_path)
-    assert path is None
-    assert source == "unset"
+def test_default_is_html_launch():
+    assert rp.DEFAULT == "html_launch"
+    assert rp.PROFILES == ("html_launch", "t2v_brand_film")
 
 
-def test_render_outside_frontmatter_is_ignored(tmp_path):
-    """Only the frontmatter block counts — prose must not set the render path."""
-    _brief(tmp_path, "---\nworkflow: x\n---\n\n## Notes\nrender: t2v\n")
-    assert rp.resolve(tmp_path) == (None, "unset")
+def test_engine_maps_each_profile_to_one_pipeline():
+    assert rp.engine("html_launch") == "html"
+    assert rp.engine("t2v_brand_film") == "t2v"
 
-
-def test_default_is_html():
-    assert rp.DEFAULT == "html"
-    assert rp.VALID == ("html", "t2v")
-
-
-# ── persist ───────────────────────────────────────────────────────────────────
 
 def test_persist_returns_false_without_a_brief(tmp_path):
-    assert rp.persist(tmp_path, "t2v") is False
+    assert rp.persist(tmp_path, "t2v_brand_film") is False
 
 
 def test_persist_then_resolve_round_trips(tmp_path):
     _brief(tmp_path, "---\nworkflow: x\n---\n\n## Intent\n体验\n")
-    assert rp.persist(tmp_path, "t2v") is True
-    assert rp.resolve(tmp_path)[0] == "t2v"
+    assert rp.persist(tmp_path, "t2v_brand_film") is True
+    assert rp.resolve(tmp_path)[0] == "t2v_brand_film"
 
 
-def test_persist_overwrites_an_existing_value(tmp_path):
-    _brief(tmp_path, "---\nrender: html\nworkflow: x\n---\n")
-    rp.persist(tmp_path, "t2v")
-    assert rp.resolve(tmp_path)[0] == "t2v"
-    # exactly one render: line survives — no duplicate keys in the frontmatter
-    assert (tmp_path / "BRIEF.md").read_text().count("render:") == 1
+def test_persist_migrates_legacy_render_to_one_profile_key(tmp_path):
+    _brief(tmp_path, "---\nrender: t2v\nworkflow: x\n---\n")
+    assert rp.persist(tmp_path, "html_launch") is True
+    text = (tmp_path / "BRIEF.md").read_text(encoding="utf-8")
+    assert "production_profile: html_launch" in text
+    assert "render:" not in text
+    assert rp.resolve(tmp_path)[0] == "html_launch"
 
 
 def test_persist_preserves_the_rest_of_the_brief(tmp_path):
     _brief(tmp_path, "---\nworkflow: product-launch-video\n---\n\n## Intent\n核心信息\n")
-    rp.persist(tmp_path, "t2v")
+    rp.persist(tmp_path, "html_launch")
     text = (tmp_path / "BRIEF.md").read_text()
     assert "workflow: product-launch-video" in text
     assert "核心信息" in text
@@ -122,55 +108,27 @@ def test_persist_preserves_the_rest_of_the_brief(tmp_path):
 
 def test_persist_creates_frontmatter_when_there_is_none(tmp_path):
     _brief(tmp_path, "# Just a heading\n\nsome prose\n")
-    assert rp.persist(tmp_path, "t2v") is True
+    assert rp.persist(tmp_path, "t2v_brand_film") is True
     text = (tmp_path / "BRIEF.md").read_text()
-    assert text.startswith("---\nrender: t2v\n---\n")
+    assert text.startswith("---\nproduction_profile: t2v_brand_film\n---\n")
     assert "some prose" in text
-    assert rp.resolve(tmp_path)[0] == "t2v"
 
 
-def test_persist_writes_only_the_brief_md_path(tmp_path):
-    """persist() checks Path(project_dir) / "BRIEF.md" — it never looks for brief.md.
-
-    On a case-insensitive filesystem this check also matches an existing
-    lowercase brief.md, so this pins the code path (`BRIEF.md` is what gets
-    opened), not a case-sensitivity guarantee.
-    """
-    _brief(tmp_path, "---\nworkflow: x\n---\n")
-    assert rp.persist(tmp_path, "t2v") is True
-    assert (tmp_path / "BRIEF.md").read_text().count("render:") == 1
+def test_frame_level_render_directive_is_rejected():
+    with pytest.raises(rp.ProfileError, match="frame-level render"):
+        rp.validate_frames([{"render": "html"}])
 
 
-# ── frame_path ────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("value", ["html", "t2v"])
-def test_frame_render_vocabulary(value):
-    other = "t2v" if value == "html" else "html"
-    assert rp.frame_path({"render": value}, other) == value
+def test_frame_level_render_path_alias_is_rejected():
+    with pytest.raises(rp.ProfileError, match="frame-level render"):
+        rp.validate_frames([{}, {"render_path": "t2v"}])
 
 
-def test_frame_value_is_case_insensitive():
-    assert rp.frame_path({"render": "T2V"}, "html") == "t2v"
+@pytest.mark.parametrize("key", ["Render", "Render_Path"])
+def test_frame_level_renderer_directive_is_rejected_case_insensitively(key):
+    with pytest.raises(rp.ProfileError, match="frame-level render"):
+        rp.validate_frames([{key: "t2v"}])
 
 
-def test_render_path_alias_is_accepted_on_a_frame():
-    assert rp.frame_path({"render_path": "t2v"}, "html") == "t2v"
-
-
-@pytest.mark.parametrize("project_default", ["html", "t2v"])
-def test_unannotated_frame_follows_the_project_default(project_default):
-    assert rp.frame_path({}, project_default) == project_default
-
-
-def test_unrecognised_frame_value_falls_back_to_the_project_default(caplog):
-    """A typo must never be read as "generate this"."""
-    assert rp.frame_path({"render": "nonsense"}, "t2v") == "t2v"
-    assert rp.frame_path({"render": "nonsense"}, "html") == "html"
-
-
-def test_old_visual_type_keyword_is_no_longer_read():
-    """`visual_type` was the old, separate frame-level vocabulary; the frame
-    override now uses the same `render:` key as the project level. A stray
-    `visual_type` line must not silently do anything."""
-    assert rp.frame_path({"visual_type": "live_action"}, "html") == "html"
-    assert rp.frame_path({"visual_type": "motion"}, "t2v") == "t2v"
+def test_frames_without_renderer_directives_are_valid():
+    rp.validate_frames([{}, {"scene": "night driving"}])
