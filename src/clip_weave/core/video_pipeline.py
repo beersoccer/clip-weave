@@ -114,6 +114,11 @@ def _request_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _proof_media_identity(snapshot: dict[str, object]) -> dict[str, object]:
+    """Keep request identity to provider-visible media, not human provenance."""
+    return {key: snapshot[key] for key in ("sha256", "uri", "scheme") if key in snapshot}
+
+
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
@@ -455,7 +460,7 @@ def generate_clips(
             "reference_audit": asdict(preflight.reference_audit),
         }
         if frame.index in proof_media_by_index:
-            audit["proof_media"] = proof_media_by_index[frame.index]
+            audit["proof_media"] = _proof_media_identity(proof_media_by_index[frame.index])
         result.request_fingerprint = _request_fingerprint(
             provider=provider,
             model=vm.model,

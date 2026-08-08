@@ -460,6 +460,51 @@ def test_changed_proof_media_snapshot_does_not_reuse_manifest(tmp_path, monkeypa
     assert len(changed.submitted) == 1
 
 
+def test_changed_proof_media_provenance_does_not_change_request_fingerprint(tmp_path, monkeypatch):
+    snapshots = iter((
+        {
+            "sha256": "a" * 64,
+            "uri": "https://cdn.example/keyframe.png",
+            "scheme": "https",
+            "source": "./keyframe.png",
+            "source_note": "Wikimedia Commons",
+            "license_note": "CC BY 4.0",
+        },
+        {
+            "sha256": "a" * 64,
+            "uri": "https://cdn.example/keyframe.png",
+            "scheme": "https",
+            "source": "./keyframe.png",
+            "source_note": "Company archive",
+            "license_note": "Internal use",
+        },
+    ))
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(reference, (snapshot := next(snapshots))["uri"], snapshot),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path,
+        model=changed,
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert changed.submitted == []
+
+
 def test_optional_local_reference_without_store_is_dropped_with_exact_audit_in_manifest(tmp_path, monkeypatch):
     for scheme in ("HTTPS", "GS"):
         for name in ("UPLOAD_URL_TEMPLATE", "URI_TEMPLATE", "UPLOAD_HEADERS_JSON"):
