@@ -35,7 +35,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ProviderConfig, TaskStatus, VideoGenError, VideoModel, VideoRequest
+from .base import (
+    ProviderCapabilities,
+    ProviderConfig,
+    TaskStatus,
+    VideoGenError,
+    VideoModel,
+    VideoRequest,
+)
 
 
 def load_config() -> ProviderConfig:
@@ -54,6 +61,16 @@ class VertexVideoModel(VideoModel):
     # Veo 3.1 accepts 4 / 6 / 8 seconds, and only 16:9 or 9:16.
     duration_choices = (4, 6, 8)
     supported_ratios = ("16:9", "9:16")
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            ratios=frozenset(self.supported_ratios),
+            resolutions=frozenset(),
+            duration_range=(min(self.duration_choices), max(self.duration_choices)),
+            duration_choices=self.duration_choices,
+            reference_uri_schemes=frozenset({"gs"}),
+        )
 
     @property
     def _model_path(self) -> str:
@@ -83,9 +100,8 @@ class VertexVideoModel(VideoModel):
         if req.image_url:
             instance["image"] = {"gcsUri": req.image_url, "mimeType": "image/png"}
 
-        ratio = req.ratio if req.ratio in self.supported_ratios else "16:9"
         params: dict[str, Any] = {
-            "aspectRatio": ratio,
+            "aspectRatio": req.ratio,
             "durationSeconds": self.clamp_duration(req.duration),
             "resolution": req.resolution.lower(),
             "sampleCount": 1,

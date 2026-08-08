@@ -96,6 +96,17 @@ class VideoRequest:
     image_url: str | None = None  # optional first-frame reference
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Static generation constraints declared by a provider adapter."""
+
+    ratios: frozenset[str]
+    resolutions: frozenset[str]
+    duration_range: tuple[int, int]
+    duration_choices: tuple[int, ...] | None = None
+    reference_uri_schemes: frozenset[str] = frozenset()
+
+
 class VideoModel:
     """Base class — subclasses implement `submit()` and `poll()`."""
 
@@ -120,6 +131,15 @@ class VideoModel:
     @property
     def model(self) -> str:
         return self.cfg.model
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            ratios=frozenset(),
+            resolutions=frozenset(),
+            duration_range=self.duration_range,
+            duration_choices=self.duration_choices,
+        )
 
     def clamp_duration(self, seconds: float | None) -> int:
         if not seconds:

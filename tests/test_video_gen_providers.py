@@ -123,6 +123,27 @@ def test_ali_clamps_within_range():
     assert vm.clamp_duration(99) == 15
 
 
+# ── provider capabilities ───────────────────────────────────────────────────
+
+def test_doubao_declares_http_reference_capabilities():
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"))
+    assert vm.capabilities.reference_uri_schemes == frozenset({"http", "https"})
+
+
+def test_ali_legacy_capabilities_match_the_size_table_and_have_no_reference_support():
+    vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5-t2v-preview"))
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16", "1:1", "4:3", "3:4"})
+    assert vm.capabilities.resolutions == frozenset({"480p", "720p", "1080p"})
+    assert vm.capabilities.reference_uri_schemes == frozenset()
+
+
+def test_vertex_declares_veo_capabilities():
+    vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1-generate-001"))
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16"})
+    assert vm.capabilities.duration_choices == (4, 6, 8)
+    assert vm.capabilities.reference_uri_schemes == frozenset({"gs"})
+
+
 # ── 豆包 / Seedance ───────────────────────────────────────────────────────────
 
 def test_doubao_submit_builds_ark_payload():
@@ -231,11 +252,12 @@ def test_ali_protocol_can_be_forced_to_legacy():
     assert session.calls[0]["json"]["parameters"]["size"] == "1920*1080"
 
 
-def test_ali_unknown_size_combination_falls_back_to_1080p_16x9():
+def test_ali_legacy_rejects_unknown_size_combination_without_fallback():
     session = FakeSession(FakeResponse({"output": {"task_id": "t"}}))
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5"), session=session)
-    vm.submit(VideoRequest(prompt="p", ratio="21:9", resolution="480p"))
-    assert session.calls[0]["json"]["parameters"]["size"] == "1920*1080"
+    with pytest.raises(VideoGenError, match="unsupported legacy size combination"):
+        vm.submit(VideoRequest(prompt="p", ratio="21:9", resolution="480p"))
+    assert session.calls == []
 
 
 def test_ali_negative_prompt_goes_into_input():
@@ -316,11 +338,11 @@ def test_vertex_model_path_override_skips_project_requirement():
     assert session.calls[0]["url"] == "http://gw/v/v1/custom/path/model:predictLongRunning"
 
 
-def test_vertex_coerces_unsupported_ratio_to_16x9():
+def test_vertex_preserves_ratio_for_preflight_to_validate():
     session = FakeSession(FakeResponse({"name": "op"}))
     vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
     vm.submit(VideoRequest(prompt="p", ratio="1:1"))
-    assert session.calls[0]["json"]["parameters"]["aspectRatio"] == "16:9"
+    assert session.calls[0]["json"]["parameters"]["aspectRatio"] == "1:1"
 
 
 def test_vertex_submit_without_operation_name_raises():
