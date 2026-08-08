@@ -505,6 +505,42 @@ def test_changed_proof_media_provenance_does_not_change_request_fingerprint(tmp_
     assert changed.submitted == []
 
 
+def test_changed_local_reference_path_with_same_materialized_media_reuses_manifest(tmp_path, monkeypatch):
+    media_identity = {
+        "sha256": "a" * 64,
+        "uri": "https://cdn.example/keyframe.png",
+        "scheme": "https",
+    }
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(
+            reference,
+            media_identity["uri"],
+            {**media_identity, "source": reference},
+        ),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "assets/first-copy.png"},
+        reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path,
+        model=changed,
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "assets/renamed-copy.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert changed.submitted == []
+
+
 def test_optional_local_reference_without_store_is_dropped_with_exact_audit_in_manifest(tmp_path, monkeypatch):
     for scheme in ("HTTPS", "GS"):
         for name in ("UPLOAD_URL_TEMPLATE", "URI_TEMPLATE", "UPLOAD_HEADERS_JSON"):

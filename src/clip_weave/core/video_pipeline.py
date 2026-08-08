@@ -119,6 +119,11 @@ def _proof_media_identity(snapshot: dict[str, object]) -> dict[str, object]:
     return {key: snapshot[key] for key in ("sha256", "uri", "scheme") if key in snapshot}
 
 
+def _fingerprint_reference_audit(audit: dict[str, object]) -> dict[str, object]:
+    """Exclude the local provenance path from durable provider task identity."""
+    return {key: value for key, value in audit.items() if key != "requested"}
+
+
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
@@ -457,7 +462,7 @@ def generate_clips(
         audit = {
             "requested_parameters": preflight.requested_parameters,
             "applied_parameters": preflight.applied_parameters,
-            "reference_audit": asdict(preflight.reference_audit),
+            "reference_audit": _fingerprint_reference_audit(asdict(preflight.reference_audit)),
         }
         if frame.index in proof_media_by_index:
             audit["proof_media"] = _proof_media_identity(proof_media_by_index[frame.index])
