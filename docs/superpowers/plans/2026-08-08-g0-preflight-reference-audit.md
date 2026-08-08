@@ -130,7 +130,7 @@ def test_requested_duration_is_normalized_and_audited():
 
 - [ ] **步骤 3：实现纯函数 preflight**
 
-实现冻结的 `ReferenceAudit` 和 `PreflightResult`。使用 `urllib.parse.urlparse(reference).scheme.lower()` 区分 URI 与本地路径；允许的 provider URI 只能来自 `capabilities.reference_uri_schemes`。验证 ratio/resolution 不在 capability 集合时立即抛出 `VideoGenError`，错误中包含 `requested`、字段名和可选值。将 duration 限制到 `duration_range`，若 `duration_choices` 非空则选择距离最小且同分时靠前的值，保持 `VideoModel.clamp_duration()` 的现有语义。
+实现冻结的 `ReferenceAudit` 和普通 dataclass `PreflightResult`。`PreflightResult` 明确携带后续 pipeline 会提交的规范化、可变 `VideoRequest`，以及序列化友好的可变 dict 审计快照；调用方可以替换字段或更新 dict，但提交前必须保持 `request` 与 `applied_parameters` 一致。使用 `urllib.parse.urlparse(reference).scheme.lower()` 区分 URI 与本地路径；允许的 provider URI 只能来自 `capabilities.reference_uri_schemes`。验证 ratio/resolution 不在 capability 集合时立即抛出 `VideoGenError`，错误中包含 `requested`、字段名和可选值。将 duration 限制到 `duration_range`，若 `duration_choices` 非空则选择距离最小且同分时靠前的值，保持 `VideoModel.clamp_duration()` 的现有语义。
 
 对于 accepted 参考，以 `dataclasses.replace(request, duration=applied_duration, image_url=reference)` 返回；optional dropped 以 `image_url=None` 返回；required blocked 抛出异常。`requested_parameters` 必须含 `ratio`、`resolution`、`duration`、`negative_prompt`、`seed`、`generate_audio`、`watermark`；`applied_parameters` 使用同一字段及归一化后的值。空参考的审计为 `not_requested`，其 requirement/applied/reason 都为 `None`。
 

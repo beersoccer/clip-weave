@@ -60,7 +60,7 @@ class ReferenceAudit:
     applied: str | None
     reason: str | None
 
-@dataclass(frozen=True)
+@dataclass
 class PreflightResult:
     request: VideoRequest
     requested_parameters: dict[str, object]
@@ -76,7 +76,9 @@ def preflight_request(
 ) -> PreflightResult: ...
 ```
 
-`request` 与 `requested_parameters` 表示用户/提示词文件所请求的值；返回的 `request` 与 `applied_parameters` 是唯一允许交给 `submit()` 的值。没有合法的 applied 值就抛出 `VideoGenError`，不返回部分结果。
+`ReferenceAudit` 是冻结的值对象；`PreflightResult` 则是普通 dataclass，因为它携带后续 pipeline 将提交的规范化、可变 `VideoRequest`，以及序列化友好的可变 dict 审计快照。调用方可以替换这些字段或更新 dict，但在提交前必须保持 `request` 与 `applied_parameters` 的一致性。
+
+`requested_parameters` 表示用户/提示词文件所请求的值；返回的 `request` 与 `applied_parameters` 是唯一允许交给 `submit()` 的值。没有合法的 applied 值就抛出 `VideoGenError`，不返回部分结果。
 
 ## 预检规则
 

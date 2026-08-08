@@ -22,7 +22,7 @@ class ReferenceAudit:
     reason: str | None
 
 
-@dataclass(frozen=True)
+@dataclass
 class PreflightResult:
     request: VideoRequest
     requested_parameters: dict[str, object]

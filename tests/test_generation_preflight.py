@@ -79,6 +79,19 @@ def test_duration_is_clamped_and_audited() -> None:
     assert result.reference_audit.reason is None
 
 
+def test_result_allows_replacing_serializable_requested_parameters() -> None:
+    result = preflight_request(
+        VideoRequest(prompt="city"),
+        capabilities(),
+        reference=None,
+        reference_requirement=None,
+    )
+
+    result.requested_parameters = {"duration": 5}
+
+    assert result.requested_parameters == {"duration": 5}
+
+
 def test_accepted_https_reference_is_preserved() -> None:
     reference = "https://cdn.example/frame.png"
 
