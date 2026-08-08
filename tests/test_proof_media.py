@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 
 from clip_weave.adapters.video_gen import VideoGenError
 from clip_weave.core import proof_media
-from clip_weave.core.proof_media import HttpPutProofMediaStore, materialize_local_reference
+from clip_weave.core.proof_media import HttpPutProofMediaStore, ProofMediaStore, materialize_local_reference
 
 
 class _Response:
@@ -27,6 +28,13 @@ def _environment(**overrides: str) -> dict[str, str]:
     }
     environment.update(overrides)
     return environment
+
+
+def test_proof_media_store_protocol_declares_uri_for_contract() -> None:
+    parameters = inspect.signature(ProofMediaStore.uri_for).parameters
+
+    assert tuple(parameters) == ("self", "scheme", "sha256", "suffix")
+    assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY for name in ("scheme", "sha256", "suffix"))
 
 
 def test_uploads_once_then_reuses_matching_ledger_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
