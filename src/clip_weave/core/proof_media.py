@@ -86,10 +86,22 @@ class HttpPutProofMediaStore:
         upload_url = _expand_template(config.upload_url_template, sha256=sha256, suffix=suffix)
         headers = dict(config.headers)
         headers["Content-Type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        headers["If-None-Match"] = "*"
         try:
             with path.open("rb") as media:
                 response = requests.put(upload_url, data=media, headers=headers)
             response.raise_for_status()
+        except requests.HTTPError:
+            if response.status_code in (409, 412):
+                return MaterializedReference(
+                    source=str(path),
+                    sha256=sha256,
+                    suffix=suffix,
+                    uri=self.uri_for(scheme=scheme, sha256=sha256, suffix=suffix),
+                    scheme=scheme,
+                    created=False,
+                )
+            request_error = VideoGenError(f"proof media {scheme}: upload request failed")
         except requests.RequestException:
             request_error = VideoGenError(f"proof media {scheme}: upload request failed")
         else:

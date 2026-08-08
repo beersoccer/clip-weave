@@ -14,8 +14,9 @@ from clip_weave.core.proof_media import HttpPutProofMediaStore, ProofMediaStore,
 
 
 class _Response:
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, status_code: int = 200) -> None:
         self.error = error
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         if self.error:
@@ -65,7 +66,7 @@ def test_uploads_once_then_reuses_matching_ledger_record(tmp_path: Path, monkeyp
     )
     assert reused.created is False
     assert len(calls) == 1
-    assert calls[0]["headers"] == {"Content-Type": "image/png"}
+    assert calls[0]["headers"] == {"Content-Type": "image/png", "If-None-Match": "*"}
     assert json.loads(ledger.read_text())["records"][0]["sha256"] == digest
 
 
@@ -123,6 +124,34 @@ def test_ledger_write_failure_does_not_delete_reference_not_created_by_this_call
         materialize_local_reference(source, tmp_path / "ledger.json", ExistingObjectStore(), "https")
 
     assert digest
+    assert deleted == []
+
+
+def test_existing_remote_object_does_not_delete_when_this_projects_ledger_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "reference.txt"
+    source.write_text("proof")
+    put_headers: list[dict[str, str]] = []
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        proof_media.requests,
+        "put",
+        lambda url, *, data, headers: put_headers.append(headers)
+        or _Response(proof_media.requests.HTTPError("already exists"), status_code=412),
+    )
+    monkeypatch.setattr(proof_media.requests, "delete", lambda url, *, headers: deleted.append(url) or _Response())
+    monkeypatch.setattr(proof_media, "_write_ledger_atomically", lambda *args: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(VideoGenError, match="disk full"):
+        materialize_local_reference(
+            source,
+            tmp_path / "project-ledger.json",
+            HttpPutProofMediaStore.from_environment(_environment()),
+            "https",
+        )
+
+    assert put_headers == [{"Content-Type": "text/plain", "If-None-Match": "*"}]
     assert deleted == []
 
 
