@@ -1,4 +1,6 @@
-# AI 视频模型接入（公司网关）
+# AI 视频模型接入（历史快照，2026-08）
+
+> 模型、价格、时长和网关能力会快速变化；本文不再是运行手册。当前能力以 `src/clip_weave/adapters/video_gen/`、`.env.example` 和 `clip_weave gen-video --help` 为准。
 
 `python -m clip_weave gen-video` 以 `STORYBOARD.md` 为输入，每个 Frame 生成一个视频片段。
 三个模型都是「提交任务 → 轮询 → 下载」的异步协议，只是协议方言不同。

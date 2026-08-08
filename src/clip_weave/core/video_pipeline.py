@@ -28,7 +28,7 @@ from clip_weave.adapters.video_gen import (
     looks_like_project_id,
     resolve_project,
 )
-from clip_weave.core.render_path import frame_path
+from clip_weave.core.render_path import ProfileError, validate_frames
 from clip_weave.core.storyboard import (
     Frame,
     Storyboard,
@@ -104,7 +104,6 @@ def generate_clips(
     duration_overrides: dict[int, int] | None = None,
     negative_overrides: dict[int, str] | None = None,
     reference_overrides: dict[int, str] | None = None,
-    render_default: str | None = None,
 ) -> list[ClipResult]:
     """Generate one clip per storyboard frame with the chosen provider."""
     report = _safe_reporter(report)
@@ -113,15 +112,12 @@ def generate_clips(
         logger.warning("storyboard: %s", warn)
     if not sb.frames:
         raise VideoGenError(f"no frames parsed from {storyboard_path}")
+    try:
+        validate_frames([frame.meta for frame in sb.frames])
+    except ProfileError as exc:
+        raise VideoGenError(str(exc)) from exc
 
     selected = _select(sb, frames)
-    if render_default is not None and not frames:
-        # --frames is an explicit operator override and must win outright — only
-        # filter by each frame's effective render path when the caller did not
-        # hand-pick frame indices. gen-video always produces T2V clips, so a
-        # frame whose effective path (its own `render:` override, else the
-        # project default) resolves to "html" has nothing to generate here.
-        selected = [f for f in selected if frame_path(f.meta, render_default) == "t2v"]
     target_ratio = ratio or sb.aspect_ratio()
     prompt_overrides = prompt_overrides or {}
     duration_overrides = duration_overrides or {}

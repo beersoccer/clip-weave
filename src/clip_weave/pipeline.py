@@ -13,6 +13,7 @@ from clip_weave.config import Config, load_config
 from clip_weave.core.intent_router import route, write_brief
 from clip_weave.core.project_factory import setup as factory_setup
 from clip_weave.core.delegator import print_delegation_instructions
+from clip_weave.core import render_path as rp
 from clip_weave.adapters.asset_matcher import match_assets
 from clip_weave.adapters.rule_guard import scan as guard_scan, save_history
 
@@ -91,6 +92,7 @@ def run(
     message: str = "",
     length: str = "30s",
     cfg: Config | None = None,
+    production_profile: rp.ProductionProfile = rp.DEFAULT,
 ) -> Path:
     """Full pipeline: route → init → brief → asset-match → delegate.
 
@@ -105,6 +107,7 @@ def run(
     # §4.1.1 resume path: existing BRIEF.md → inject candidates if STORYBOARD ready, then delegate
     if (project_dir / "BRIEF.md").exists():
         logger.info("BRIEF.md already exists — skipping intent routing, delegating directly")
+        rp.persist(project_dir, production_profile)
         _inject_asset_candidates(project_dir, cfg)
         print_delegation_instructions(project_dir)
         return project_dir
@@ -120,12 +123,13 @@ def run(
     # ③ Write BRIEF.md
     brief_path = write_brief(result, project_dir)
     logger.info("BRIEF.md written: %s", brief_path)
+    rp.persist(project_dir, production_profile)
 
     # ④ Asset Matcher
     desc_file = project_dir / "capture" / "extracted" / "asset-descriptions.md"
     if desc_file.exists():
         if (project_dir / "STORYBOARD.md").exists():
-            # STORYBOARD already generated (e.g. re-run after HF session) — inject per-frame
+            # STORYBOARD already generated (e.g. re-run after HF session) — inject candidates into it.
             _inject_asset_candidates(project_dir, cfg)
         else:
             # STORYBOARD not yet generated — log top candidate for early visibility

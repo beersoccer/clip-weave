@@ -1,4 +1,6 @@
-# clip-weave — 设计规格
+# clip-weave — 设计规格（历史，2026-07-20）
+
+> 已实现或已被后续架构取代；当前设计见[架构](../../../architecture.md)。
 
 > 版本：v1.0 | 日期：2026-07-20
 > 范围：Phase 1（视频理解 MVP）+ Phase 2a（HyperFrames 路径）

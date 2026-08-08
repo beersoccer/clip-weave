@@ -408,7 +408,7 @@ def test_concat_surfaces_ffmpeg_failure(tmp_path, monkeypatch):
         concat_clips([clip], tmp_path / "full.mp4", report=lambda _: None)
 
 
-# ── per-frame render: overrides ───────────────────────────────────────────────
+# ── forbidden frame-level renderer directives ─────────────────────────────────
 
 MIXED_STORYBOARD = """---
 format: 1920x1080
@@ -431,60 +431,16 @@ message: "test message"
 """
 
 
-def test_render_default_html_skips_frames_still_routed_to_html(tmp_path):
-    """render_default='html' + frame 2's own `render: t2v` override means only
-    frame 2 gets a T2V clip. Frame 3 has no override at all and follows the
-    project default (html), so it is excluded too — only frame 2 survives.
-    """
-    model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html")
-
-    assert [r.index for r in results] == [2]
-    assert len(model.submitted) == 1
+def test_t2v_pipeline_rejects_storyboard_with_frame_level_render(tmp_path):
+    with pytest.raises(VideoGenError, match="frame-level render"):
+        _run(tmp_path, MIXED_STORYBOARD, model=FakeModel())
 
 
-def test_render_default_html_generates_the_t2v_overridden_frame(tmp_path):
-    model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html")
-
-    by_index = {r.index: r for r in results}
-    assert by_index[2].state == "succeeded"
-    assert "城市夜景" in model.submitted[0].prompt
+def test_explicit_frames_do_not_bypass_frame_level_render_validation(tmp_path):
+    with pytest.raises(VideoGenError, match="frame-level render"):
+        _run(tmp_path, MIXED_STORYBOARD, model=FakeModel(), frames=[2])
 
 
-def test_unannotated_frame_follows_the_html_project_default():
-    """frame_path({}, "html") == "html" per render_path.py's own contract — confirm
-    generate_clips respects that: an unannotated frame under an html-default
-    project is treated as HTML-routed (excluded)."""
-    from clip_weave.core.render_path import frame_path
-
-    assert frame_path({}, "html") == "html"
-
-
-def test_render_default_none_generates_every_frame_unchanged(tmp_path):
-    """No render_default (the pre-existing behavior) must be untouched: every
-    frame gets a clip regardless of its `render:` override."""
-    model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model)  # no render_default passed
-
-    assert [r.index for r in results] == [1, 2, 3]
-
-
-def test_render_default_t2v_generates_every_frame_when_none_opt_out(tmp_path):
-    """render_default='t2v' with no frame opting into 'html' generates every
-    frame — the per-frame filter only excludes frames whose effective path
-    resolves to 'html'."""
-    model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="t2v")
-
-    # frame 1 opts into html under a t2v-default project and is excluded.
-    assert [r.index for r in results] == [2, 3]
-
-
-def test_explicit_frames_still_overrides_mixed_filtering(tmp_path):
-    """--frames stays an unconditional override, same as it already is for
-    plain routing — the per-frame filter must not fight an explicit frame list."""
-    model = FakeModel()
-    results = _run(tmp_path, MIXED_STORYBOARD, model=model, render_default="html", frames=[1])
-
-    assert [r.index for r in results] == [1]
+def test_t2v_pipeline_generates_every_unannotated_storyboard_frame(tmp_path):
+    results = _run(tmp_path, STORYBOARD, model=FakeModel())
+    assert [result.index for result in results] == [1, 2]

@@ -1,4 +1,6 @@
-# Rule Guard 有效性收缩 + T2V 逐帧路由 Implementation Plan
+# Rule Guard 有效性收缩 + T2V 逐帧路由 Implementation Plan（历史，2026-07-31）
+
+> 已完成/废弃的实施计划；不作为当前待办。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
