@@ -42,11 +42,11 @@ clip-weave 是视频生产的前置编排层，不是另一个视频模型或完
 
 ### T2V 路径
 
-`core/t2v_prompt.py` 将 storyboard 转为可编辑的 `T2V-PROMPTS.md`。图形化的 scene 会被改写成可拍摄镜头，无法安全改写的 frame 会标记为 `needs_review`。`core/generation_preflight.py` 是 adapter capability 与 `core/video_pipeline.py` 之间纯本地的 G0 边界：它使用已选 adapter 的静态 capability 校验请求、归一化时长，并审计 reference，不发网络请求、不发现远程能力，也不构成完整质量系统。`core/video_pipeline.py` 仅在选中 batch 全部通过预检后才负责所有 storyboard frame 的 submit → poll → download，并写入 `renders/ai-clips/<provider>/manifest.json`；必需 reference 不能使用时会阻止整个 batch，optional reference 则按 capability 接受或丢弃。`concat_clips()` 用 FFmpeg 合流。provider 适配器位于 `adapters/video_gen/`，目前包括 doubao、ali 和 vertex。
+`core/t2v_prompt.py` 将 storyboard 转为可编辑的 `T2V-PROMPTS.md`。图形化的 scene 会被改写成可拍摄镜头，无法安全改写的 frame 会标记为 `needs_review`。`core/generation_preflight.py` 是 adapter capability 与 `core/video_pipeline.py` 之间纯本地的 G0 边界：它使用已选 adapter 的静态 capability 校验请求、归一化时长，并审计 reference，不发网络请求、不发现远程能力，也不构成完整质量系统。`core/video_pipeline.py` 仅在选中 batch 全部通过预检后才负责选中镜头的 submit → poll → download，并写入 `renders/ai-clips/<provider>/manifest.json`；必需 reference 不能使用时会阻止整个 batch，optional reference 则按 capability 接受或丢弃。`concat_clips()` 用 FFmpeg 合流。provider 适配器位于 `adapters/video_gen/`，目前包括 doubao、ali 和 vertex。
 
-manifest 是版本化的耐久状态记录。它为每个镜头保存规范请求指纹、预检的 requested parameters 与 applied parameters，以及 optional reference 的 accepted/dropped 结果和原因；并在提交前写入 `submitting`、拿到 task id 后写入 `running`、远端成功后先写入 `download_pending`、下载完成后写入 `succeeded`。同一指纹再次运行时，已有完成文件会直接复用，运行中的任务只会轮询，待下载记录只会下载；`submitting`（提交结果不确定）和 provider 明确失败的记录都不会自动重提。清单通过临时文件、`fsync` 和 `os.replace()` 原子更新。
+manifest 是版本化的耐久状态记录。它为每个选中镜头保存规范请求指纹、预检的 requested parameters 与 applied parameters，以及轻量首帧 reference audit 的 accepted/dropped 结果和原因；该审计已写入 manifest。清单在提交前写入 `submitting`、拿到 task id 后写入 `running`、远端成功后先写入 `download_pending`、下载完成后写入 `succeeded`。同一指纹再次运行时，已有完成文件会直接复用，运行中的任务只会轮询，待下载记录只会下载；`submitting`（提交结果不确定）和 provider 明确失败的记录都不会自动重提。清单通过临时文件、`fsync` 和 `os.replace()` 原子更新。
 
-这仍是 P3 前的 T2V 实现。目标的 T2I→I2V 关键帧链、Reference Audit 与质量 Gate 见 [production-quality-loop.md](production-quality-loop.md)，在其实现前不能作为当前能力宣称。
+这仍是 P3 前的 T2V 实现。当前轻量首帧 reference audit 只审计请求是否可按 adapter capability 使用；完整生产质量的 Reference Audit（产品、人物、场景、风格、proof media 等）尚未实现。目标的 T2I→I2V 关键帧链与完整质量 Gate 见 [production-quality-loop.md](production-quality-loop.md)，在其实现前不能作为当前能力宣称。
 
 ### 规则与验证
 
