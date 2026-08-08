@@ -6,7 +6,12 @@ No real HTTP: a FakeSession records requests and returns canned JSON.
 import pytest
 import requests
 
-from clip_weave.adapters.video_gen import VideoGenError, VideoRequest, get_model
+from clip_weave.adapters.video_gen import (
+    ProviderCapabilities,
+    VideoGenError,
+    VideoRequest,
+    get_model,
+)
 from clip_weave.adapters.video_gen.ali import AliVideoModel
 from clip_weave.adapters.video_gen.base import ProviderConfig, TaskStatus
 from clip_weave.adapters.video_gen.doubao import DoubaoVideoModel
@@ -74,6 +79,14 @@ def test_from_env_prefers_providers_own_key_over_shared(monkeypatch):
 def test_get_model_rejects_unknown_provider():
     with pytest.raises(VideoGenError, match="unknown provider"):
         get_model("midjourney")
+
+
+def test_provider_capabilities_preserves_reference_schemes_positional_argument():
+    capabilities = ProviderCapabilities(
+        frozenset(), frozenset(), (4, 8), None, frozenset({"gs"})
+    )
+    assert capabilities.reference_uri_schemes == frozenset({"gs"})
+    assert capabilities.supported_resolution_ratios is None
 
 
 # ── clamp_duration ────────────────────────────────────────────────────────────
