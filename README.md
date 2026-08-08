@@ -72,7 +72,9 @@ uv run python -m clip_weave gen-video videos/ev-launch/STORYBOARD.md \
 
 ## 当前实现与下一步
 
-现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头 `manifest.json` 输出。生产级质量闭环中的可恢复 Job Ledger、Reference Audit、关键帧候选、镜头质量契约和局部重做仍是下一步工作；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
+现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头的可恢复 `manifest.json`。每次提交前、远端任务完成待下载时、下载完成或出现本地等待/下载错误时，清单都会原子更新。相同请求再次执行时会复用已完成文件，或仅继续轮询、下载既有任务；对于提交结果不确定的 `submitting` 记录，不会自动重提，以避免重复消耗模型额度。
+
+这不是 provider 端的 exactly-once 保证：清单不会自动重新提交任务。Reference Audit、关键帧候选、镜头质量契约、媒体 QC 和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
 
 ## 验证
 

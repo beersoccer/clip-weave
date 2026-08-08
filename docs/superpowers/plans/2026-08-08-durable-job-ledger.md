@@ -23,7 +23,7 @@
 - 修改：`tests/test_video_pipeline.py:29-83,117-195`
 - 测试：`tests/test_video_pipeline.py`
 
-- [ ] **步骤 1：让 FakeModel 能在指定提交处中断**
+- [x] **步骤 1：让 FakeModel 能在指定提交处中断**
 
 扩展构造器与 `submit()`，保留现有 poll/download 行为：
 
@@ -44,7 +44,7 @@ def submit(self, req):
     return f"task-{len(self.submitted)}"
 ```
 
-- [ ] **步骤 2：写入早期持久化和恢复的红灯测试**
+- [x] **步骤 2：写入早期持久化和恢复的红灯测试**
 
 ```python
 def _manifest(tmp_path):
@@ -77,7 +77,7 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
     assert resumed.downloaded == []
 ```
 
-- [ ] **步骤 3：确认红灯**
+- [x] **步骤 3：确认红灯**
 
 运行：`uv run pytest -q tests/test_video_pipeline.py::test_manifest_is_written_before_a_later_submit_crashes tests/test_video_pipeline.py::test_running_task_is_polled_on_repeat_without_resubmission tests/test_video_pipeline.py::test_completed_file_is_reused_without_provider_io`
 
@@ -89,7 +89,7 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
 - 修改：`src/clip_weave/core/video_pipeline.py:13-18,69-81`
 - 测试：`tests/test_video_pipeline.py`
 
-- [ ] **步骤 1：添加请求身份字段和 imports**
+- [x] **步骤 1：添加请求身份字段和 imports**
 
 ```python
 import hashlib
@@ -106,7 +106,7 @@ class ClipResult:
     # existing fields remain below
 ```
 
-- [ ] **步骤 2：写入指纹与失败关闭的红灯测试**
+- [x] **步骤 2：写入指纹与失败关闭的红灯测试**
 
 ```python
 def test_changed_request_fingerprint_submits_one_new_task(tmp_path):
@@ -129,7 +129,7 @@ def test_manifest_write_failure_prevents_submit(tmp_path, monkeypatch):
     assert model.submitted == []
 ```
 
-- [ ] **步骤 3：实现私有 helper**
+- [x] **步骤 3：实现私有 helper**
 
 在 `ClipResult` 后添加 `_MANIFEST_SCHEMA_VERSION = 2`、`_request_fingerprint()`、`_atomic_write_manifest()`、`_load_manifest()`、`_find_clip()` 和 `_persist_clip()`。
 
@@ -149,7 +149,7 @@ def _request_fingerprint(*, provider, model, index, request, reference):
 
 `_atomic_write_manifest()` 用同目录 `NamedTemporaryFile`、`json.dump`、`flush`、`os.fsync` 和 `os.replace`；`_load_manifest()` 对缺失文件返回 v2 空列表，对损坏 JSON、非 object 根节点或非 list 的 `clips` 抛出带 manifest 路径的 `VideoGenError`；`_persist_clip()` 只替换相同 index/fingerprint，否则 append `asdict(clip)` 并调用原子 writer。
 
-- [ ] **步骤 4：确认基础能力绿灯**
+- [x] **步骤 4：确认基础能力绿灯**
 
 运行：`uv run pytest -q tests/test_video_pipeline.py::test_changed_request_fingerprint_submits_one_new_task tests/test_video_pipeline.py::test_manifest_write_failure_prevents_submit`
 
@@ -169,7 +169,7 @@ git commit -m "feat(video): add atomic durable manifest primitives"
 - 修改：`tests/test_video_pipeline.py:154-195`
 - 测试：`tests/test_video_pipeline.py`
 
-- [ ] **步骤 1：替换本地错误即终态的旧测试**
+- [x] **步骤 1：替换本地错误即终态的旧测试**
 
 ```python
 def test_download_failure_stays_download_pending_and_resumes_without_submit(tmp_path):
@@ -192,13 +192,13 @@ def test_submitting_record_is_never_resubmitted(tmp_path):
     assert resumed.submitted == []
 ```
 
-- [ ] **步骤 2：确认恢复测试红灯**
+- [x] **步骤 2：确认恢复测试红灯**
 
 运行：`uv run pytest -q tests/test_video_pipeline.py::test_download_failure_stays_download_pending_and_resumes_without_submit tests/test_video_pipeline.py::test_timeout_keeps_task_running_for_a_later_resume tests/test_video_pipeline.py::test_submitting_record_is_never_resubmitted`
 
 预期：失败；当前实现会将下载错误和超时改为 `failed`，也没有持久化 `submitting`。
 
-- [ ] **步骤 3：最小重构 generate_clips()**
+- [x] **步骤 3：最小重构 generate_clips()**
 
 在 `vm` 与 `out` 创建后加载 manifest：
 
@@ -238,7 +238,7 @@ results.append(result)
 
 只轮询有 task ID 的 `running`。轮询异常或 `max_wait` 时保持 `running`、保存说明性 error 并结束本次观察；provider 明确失败才保存 `failed`。provider 成功时先保存 `download_pending` 与 URL；新任务和恢复任务均下载到 `*.part`，`os.replace` 到最终路径后才保存 `succeeded`。下载错误保持 `download_pending`，不再提交或轮询。
 
-- [ ] **步骤 4：确认完整 pipeline 绿灯**
+- [x] **步骤 4：确认完整 pipeline 绿灯**
 
 运行：`uv run pytest -q tests/test_video_pipeline.py`
 
@@ -258,11 +258,11 @@ git commit -m "feat(video): resume durable clip tasks"
 - 修改：`docs/architecture.md:45-68`
 - 测试：完整项目测试
 
-- [ ] **步骤 1：更新能力边界**
+- [x] **步骤 1：更新能力边界**
 
 两份文档说明：`manifest.json` 在提交、远端完成、待下载与最终状态时原子更新；匹配记录会恢复且不自动重提。保持重试分类、artifact hash、媒体 QC、Reference Audit 和关键帧为后续范围；不得宣称 provider 端 exactly-once。
 
-- [ ] **步骤 2：验证文档和全量行为**
+- [x] **步骤 2：验证文档和全量行为**
 
 ```bash
 rg -n -i 'manifest.*end|manifest.*本轮结束|durable job ledger.*next|尚不是.*ledger' README.md docs/architecture.md

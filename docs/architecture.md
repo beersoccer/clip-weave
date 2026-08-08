@@ -44,7 +44,9 @@ clip-weave 是视频生产的前置编排层，不是另一个视频模型或完
 
 `core/t2v_prompt.py` 将 storyboard 转为可编辑的 `T2V-PROMPTS.md`。图形化的 scene 会被改写成可拍摄镜头，无法安全改写的 frame 会标记为 `needs_review`。`core/video_pipeline.py` 负责所有 storyboard frame 的 submit → poll → download，并写入 `renders/ai-clips/<provider>/manifest.json`；`concat_clips()` 用 FFmpeg 合流。provider 适配器位于 `adapters/video_gen/`，目前包括 doubao、ali 和 vertex。
 
-这仍是 P3 前的 T2V 实现。目标的 T2I→I2V 关键帧链、Reference Audit、Job Ledger 与质量 Gate 见 [production-quality-loop.md](production-quality-loop.md)，在其实现前不能作为当前能力宣称。
+manifest 是版本化的耐久状态记录。它为每个镜头保存规范请求指纹，并在提交前写入 `submitting`、拿到 task id 后写入 `running`、远端成功后先写入 `download_pending`、下载完成后写入 `succeeded`。同一指纹再次运行时，已有完成文件会直接复用，运行中的任务只会轮询，待下载记录只会下载；`submitting`（提交结果不确定）和 provider 明确失败的记录都不会自动重提。清单通过临时文件、`fsync` 和 `os.replace()` 原子更新。
+
+这仍是 P3 前的 T2V 实现。目标的 T2I→I2V 关键帧链、Reference Audit 与质量 Gate 见 [production-quality-loop.md](production-quality-loop.md)，在其实现前不能作为当前能力宣称。
 
 ### 规则与验证
 
@@ -65,7 +67,7 @@ clip-weave 是视频生产的前置编排层，不是另一个视频模型或完
 
 ## 4. 可靠性边界
 
-当前实现已能输出每镜头 task id、状态、URL、路径和错误到 `manifest.json`，但 manifest 在本轮结束时写入，尚不是崩溃后可恢复的 durable job ledger。下一步应原子保存 submit、poll、download 各次状态，以 `shot_id + run_id + provider_task_id + prompt_version + idempotency_key` 恢复任务而不是重复扣费。
+当前实现将每镜头 task id、状态、下载来源（URL 或内联内容的短生命周期 sidecar）、路径、错误和请求指纹写入 `manifest.json`，并在状态变化时原子持久化。恢复以相同请求指纹为边界，目标是避免本地重复提交；它不提供 provider 端 exactly-once，也不会自动重新提交 `submitting` 或 `failed` 记录。
 
 下载后仍应执行媒体探测：文件类型、大小、哈希、`ffprobe` 时长/分辨率/fps/音轨。它提高交付可靠性，不等同于提升审美质量。
 

@@ -5,10 +5,13 @@ network, ffmpeg binary, or gateway is touched.
 """
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
 from clip_weave.adapters.video_gen import TaskStatus, VideoGenError
+from clip_weave.core import video_pipeline
 from clip_weave.core.video_pipeline import ClipResult, concat_clips, generate_clips
 
 STORYBOARD = """---
@@ -33,12 +36,24 @@ class FakeModel:
     duration_range = (5, 10)
     duration_choices = None
 
-    def __init__(self, *, submit_error=None, polls=None, download_error=None):
+    def __init__(
+        self,
+        *,
+        submit_error=None,
+        crash_on_submit_number=None,
+        polls=None,
+        poll_error=None,
+        download_error=None,
+    ):
         self.submit_error = submit_error
+        self.crash_on_submit_number = crash_on_submit_number
         self.polls = polls or {}
+        self.poll_error = poll_error
         self.download_error = download_error
         self.submitted = []
+        self.polled = []
         self.downloaded = []
+        self.download_statuses = []
         self._poll_counts = {}
 
     def clamp_duration(self, seconds):
@@ -46,11 +61,16 @@ class FakeModel:
 
     def submit(self, req):
         self.submitted.append(req)
+        if self.crash_on_submit_number == len(self.submitted):
+            raise RuntimeError("simulated process stop")
         if self.submit_error:
             raise VideoGenError(self.submit_error)
         return f"task-{len(self.submitted)}"
 
     def poll(self, task_id):
+        self.polled.append(task_id)
+        if self.poll_error:
+            raise VideoGenError(self.poll_error)
         n = self._poll_counts.get(task_id, 0)
         self._poll_counts[task_id] = n + 1
         scripted = self.polls.get(task_id)
@@ -61,6 +81,7 @@ class FakeModel:
         return scripted
 
     def download(self, status, dest):
+        self.download_statuses.append(status)
         if self.download_error:
             raise OSError(self.download_error)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +102,11 @@ def _run(tmp_path, body=STORYBOARD, **kwargs):
     kwargs.setdefault("poll_interval", 0)
     kwargs.setdefault("report", lambda _: None)
     return generate_clips(_storyboard(tmp_path, body), **kwargs)
+
+
+def _manifest(tmp_path):
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # ── dry run ───────────────────────────────────────────────────────────────────
@@ -127,6 +153,242 @@ def test_manifest_records_run_metadata(tmp_path):
     assert manifest["clips"][0]["state"] == "succeeded"
 
 
+def test_manifest_is_written_before_a_later_submit_crashes(tmp_path):
+    with pytest.raises(RuntimeError, match="simulated process stop"):
+        _run(tmp_path, model=FakeModel(crash_on_submit_number=2))
+
+    manifest = _manifest(tmp_path)
+    assert manifest["schema_version"] == 2
+    assert manifest["clips"][0]["state"] == "running"
+    assert manifest["clips"][0]["task_id"] == "task-1"
+    assert manifest["clips"][1]["state"] == "submitting"
+    assert manifest["clips"][1]["task_id"] is None
+
+
+def test_running_task_is_polled_on_repeat_without_resubmission(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+
+    resumed = FakeModel(
+        polls={
+            "task-1": TaskStatus(
+                state="succeeded", raw={}, video_url="https://cdn/task-1.mp4"
+            )
+        }
+    )
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.downloaded
+
+
+def test_completed_file_is_reused_without_provider_io(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.downloaded == []
+
+
+def test_legacy_manifest_without_fingerprint_does_not_resume_task(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].pop("request_fingerprint")
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1])
+
+    assert len(resumed.submitted) == 1
+
+
+def test_malformed_matching_manifest_record_raises_video_error(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].pop("title")
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(VideoGenError, match=r"invalid manifest record .*manifest.json"):
+        _run(tmp_path, model=FakeModel(), frames=[1])
+
+
+def test_missing_completed_file_redownloads_from_manifest_source(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    (tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4").unlink()
+
+    resumed = FakeModel(download_error="disk full")
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["download_pending"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+
+
+def test_missing_completed_file_without_download_source_returns_to_running(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["state"] = "succeeded"
+    manifest["clips"][0]["video_path"] = "missing.mp4"
+    manifest["clips"][0]["video_url"] = None
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel(polls={"task-1": TaskStatus(state="running", raw={})})
+    results = _run(tmp_path, model=resumed, frames=[1], max_wait=0)
+
+    assert [result.state for result in results] == ["running"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+
+
+def test_changed_request_fingerprint_submits_one_new_task(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+        seed=1,
+    )
+
+    changed = FakeModel()
+    _run(tmp_path, model=changed, frames=[1], seed=2)
+
+    assert len(changed.submitted) == 1
+    records = [clip for clip in _manifest(tmp_path)["clips"] if clip["index"] == 1]
+    assert len({clip["request_fingerprint"] for clip in records}) == 2
+
+
+def test_manifest_write_failure_prevents_submit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "clip_weave.core.video_pipeline._atomic_write_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        raising=False,
+    )
+    model = FakeModel()
+
+    with pytest.raises(OSError, match="disk full"):
+        _run(tmp_path, model=model, frames=[1])
+
+    assert model.submitted == []
+
+
+def test_atomic_manifest_write_syncs_parent_directory(tmp_path, monkeypatch):
+    path = tmp_path / "manifest.json"
+    directory_fds = []
+    synced_fds = []
+    real_open = os.open
+    real_fsync = os.fsync
+
+    def tracking_open(name, *args, **kwargs):
+        fd = real_open(name, *args, **kwargs)
+        if Path(name) == path.parent:
+            directory_fds.append(fd)
+        return fd
+
+    def tracking_fsync(fd):
+        synced_fds.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(video_pipeline.os, "open", tracking_open)
+    monkeypatch.setattr(video_pipeline.os, "fsync", tracking_fsync)
+
+    video_pipeline._atomic_write_manifest(path, {"clips": []})
+
+    assert directory_fds
+    assert directory_fds[0] in synced_fds
+
+
+def test_download_failure_stays_download_pending_and_resumes_without_submit(tmp_path):
+    first_results = _run(tmp_path, model=FakeModel(download_error="disk full"), frames=[1])
+    assert [result.state for result in first_results] == ["download_pending"]
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.downloaded
+
+
+def test_inline_video_result_resumes_download_without_polling(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(
+            polls={
+                "task-1": TaskStatus(
+                    state="succeeded", raw={}, video_b64="ZmFrZSBtcDQ="
+                )
+            },
+            download_error="disk full",
+        ),
+        frames=[1],
+    )
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+    assert resumed.download_statuses[0].video_b64 == "ZmFrZSBtcDQ="
+    assert "ZmFrZSBtcDQ=" not in json.dumps(_manifest(tmp_path))
+
+
+def test_timeout_keeps_task_running_for_a_later_resume(tmp_path):
+    results = _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+
+    assert [result.state for result in results] == ["running"]
+    assert _manifest(tmp_path)["clips"][0]["state"] == "running"
+
+
+def test_transient_poll_error_keeps_task_running(tmp_path):
+    results = _run(tmp_path, model=FakeModel(poll_error="gateway unavailable"), frames=[1])
+
+    assert [result.state for result in results] == ["running"]
+    assert "gateway unavailable" in results[0].error
+
+
+def test_submitting_record_is_never_resubmitted(tmp_path):
+    _run(tmp_path, model=FakeModel(submit_error="connection reset"), frames=[1])
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["submitting"]
+    assert resumed.submitted == []
+
+
 def test_frames_filter_selects_a_subset(tmp_path):
     model = FakeModel()
     results = _run(tmp_path, model=model, frames=[2])
@@ -153,10 +415,10 @@ def test_include_voiceover_and_style_reach_the_prompt(tmp_path):
 
 # ── failure paths ─────────────────────────────────────────────────────────────
 
-def test_submit_failure_is_recorded_per_frame(tmp_path):
+def test_submit_failure_is_retained_as_ambiguous_submission(tmp_path):
     results = _run(tmp_path, model=FakeModel(submit_error="quota exceeded"))
 
-    assert [r.state for r in results] == ["failed", "failed"]
+    assert [r.state for r in results] == ["submitting", "submitting"]
     assert all("quota exceeded" in r.error for r in results)
     assert all(r.task_id is None for r in results)
 
@@ -171,15 +433,15 @@ def test_poll_failure_marks_only_that_frame(tmp_path):
     assert by_index[2].state == "succeeded"
 
 
-def test_download_failure_is_reported_as_failed(tmp_path):
+def test_download_failure_remains_download_pending(tmp_path):
     results = _run(tmp_path, model=FakeModel(download_error="disk full"))
 
-    assert [r.state for r in results] == ["failed", "failed"]
+    assert [r.state for r in results] == ["download_pending", "download_pending"]
     assert "download failed" in results[0].error
     assert "disk full" in results[0].error
 
 
-def test_timeout_marks_pending_frames_failed(tmp_path):
+def test_timeout_keeps_pending_frames_running(tmp_path):
     still_running = TaskStatus(state="running", raw={})
     results = _run(
         tmp_path,
@@ -187,8 +449,8 @@ def test_timeout_marks_pending_frames_failed(tmp_path):
         max_wait=0,
     )
 
-    assert [r.state for r in results] == ["failed", "failed"]
-    assert all("timed out" in r.error for r in results)
+    assert [r.state for r in results] == ["running", "running"]
+    assert all("wait budget elapsed" in r.error for r in results)
 
 
 def test_elapsed_seconds_is_recorded_on_success(tmp_path):
