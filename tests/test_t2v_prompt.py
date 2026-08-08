@@ -229,6 +229,38 @@ def test_markdown_round_trip(tmp_path):
     assert reparsed.globals["provider"] == "doubao"
 
 
+def test_required_reference_requirement_round_trips(tmp_path):
+    sb = parse_storyboard(_project(tmp_path))
+    doc = build_doc(sb)
+    doc.specs[0].reference_requirement = "required"
+
+    rendered = render_markdown(doc)
+    reparsed = parse_markdown_from_text(tmp_path, rendered)
+
+    assert "- reference_requirement: required" in rendered
+    assert reparsed.specs[0].reference_requirement == "required"
+
+
+def test_reference_without_requirement_defaults_to_optional(tmp_path):
+    doc = parse_markdown_from_text(
+        tmp_path,
+        "## Frame 1 — Chassis\n- reference: assets/chassis.png\n",
+    )
+
+    assert doc.specs[0].reference == "assets/chassis.png"
+    assert doc.specs[0].reference_requirement == "optional"
+
+
+def test_invalid_reference_requirement_defaults_to_optional(tmp_path):
+    doc = parse_markdown_from_text(
+        tmp_path,
+        "## Frame 1 — Chassis\n- reference: assets/chassis.png\n"
+        "- reference_requirement: preferred\n",
+    )
+
+    assert doc.specs[0].reference_requirement == "optional"
+
+
 def parse_markdown_from_text(tmp_path, text):
     path = tmp_path / PROMPTS_FILENAME
     path.write_text(text, encoding="utf-8")
