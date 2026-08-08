@@ -17,6 +17,9 @@ output/
 # design/decision record and belong in git.
 .superpowers/
 
+# Local feature worktrees
+.worktrees/
+
 # macOS
 .DS_Store
 **/.DS_Store

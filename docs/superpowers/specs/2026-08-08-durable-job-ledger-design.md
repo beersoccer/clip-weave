@@ -1,146 +1,95 @@
-# Durable Job Ledger Design
+# 耐久任务账本设计
 
-**Status:** approved design; implementation has not started.
+**状态：** 已批准；尚未开始实现。
 
-## Goal
+## 目标
 
-Make a repeat `gen-video` invocation resume already-submitted video tasks instead
-of submitting the same prompt again and consuming more model quota.  The change
-uses the existing `manifest.json` path and `generate_clips()` entry point.
+让重复执行 `gen-video` 时恢复已知的视频生成任务，而不是再次提交相同提示词并消耗模型额度。实现复用现有 `manifest.json` 路径与 `generate_clips()` 入口。
 
-## Scope
+## 范围
 
-The MVP covers atomic local state persistence, resume, and duplicate-submit
-prevention for one storyboard/provider output directory.  It does not add a new
-CLI command, a database, cross-machine coordination, provider capability
-discovery, provider-side idempotency headers, automatic retry/backoff, media QC,
-or hashes.
+本 MVP 仅覆盖单个 storyboard/provider 输出目录内的原子本地状态持久化、恢复和重复提交防护。不新增 CLI 命令、数据库、跨机器协调、provider 能力注册、服务端幂等请求头、自动重试/退避、媒体 QC 或 artifact hash。
 
-## Current problem
+## 当前问题
 
-`generate_clips()` keeps every `ClipResult` only in memory and writes
-`manifest.json` once, after polling and downloads finish.  A process stop after
-`VideoModel.submit()` therefore loses the provider task ID.  Rerunning the same
-storyboard submits the task again.
+`generate_clips()` 仅在内存保存 `ClipResult`，并在全部轮询、下载结束后才写入 `manifest.json`。若进程在 `VideoModel.submit()` 后停止，provider task ID 丢失；下一次执行会再次提交同一镜头。
 
-## Data model
+## 数据模型
 
-`renders/ai-clips/<provider>/manifest.json` becomes a versioned, durable record.
-It retains the existing top-level storyboard, provider, model, resolution, and
-ratio fields and adds `schema_version: 2`.  Each clip record adds:
+`renders/ai-clips/<provider>/manifest.json` 升级为版本化恢复记录，保留现有的 storyboard、provider、model、resolution、ratio 字段，并新增 `schema_version: 2`。每个镜头记录新增：
 
-- `request_fingerprint`: SHA-256 of canonical JSON containing provider, model,
-  frame index, prompt, duration, ratio, resolution, negative prompt, seed,
-  audio flag, watermark flag, and reference value.
-- `state`: one of `submitting`, `running`, `download_pending`, `succeeded`, or
-  `failed`.
-- Existing task ID, provider result URL, local video path, error, elapsed time,
-  and request-derived metadata.
+- `request_fingerprint`：对 provider、model、镜头序号、提示词、时长、比例、分辨率、负提示词、seed、音频、水印和参考素材做规范 JSON 后计算的 SHA-256。
+- `state`：`submitting`、`running`、`download_pending`、`succeeded` 或 `failed`。
+- 现有 task ID、provider 结果 URL、本地路径、错误、耗时和请求元数据。
 
-The fingerprint is a local semantic identity, not a provider API idempotency
-key.  It is recomputed before every invocation.  An existing record is reusable
-only when its fingerprint matches exactly.
+指纹只是本地语义身份，不是 provider API 的幂等键。只有指纹完全相同的记录才能恢复；同一镜头经过有意的提示词或参数修改会创建新记录，不覆盖旧 task 记录。
 
-The manifest may contain historical records for an earlier fingerprint of the
-same frame.  The active invocation selects by frame index plus fingerprint, so
-an intentional prompt or parameter change creates a fresh job without erasing
-the previous provider task record.
+## 原子持久化
 
-## Atomic persistence
+所有写入经过一个私有 helper：
 
-All writes go through one private helper:
+1. 在 manifest 同目录写入唯一临时文件。
+2. flush 并 `fsync` 临时文件。
+3. 用 `os.replace()` 替换 `manifest.json`。
 
-1. Serialize the complete manifest to a uniquely named temporary file in the
-   manifest directory.
-2. Flush and `fsync` the temporary file.
-3. Replace `manifest.json` with `os.replace()`.
+在 provider 提交前和每个持久状态转换后调用它。写入失败时，任务不得调用 provider；不引入新的存储依赖。
 
-The helper runs before a provider submit and after every durable transition.  A
-write failure aborts that job before any provider call.  There is no new storage
-dependency.
+## 状态机
 
-## State machine
-
-| State | Meaning | Next action on a repeat invocation |
+| 状态 | 含义 | 下次执行的动作 |
 | --- | --- | --- |
-| `submitting` | The request fingerprint was persisted before `submit()`, but no provider task ID was persisted. | Stop this job and report its recorded error; never auto-submit it again. |
-| `running` | A provider task ID was persisted. | Poll the existing task ID only. |
-| `download_pending` | Provider returned a successful video URL, but local output is not confirmed. | Download the existing provider result only. |
-| `succeeded` | The destination file was written and its path persisted. | Reuse it only when the file still exists. |
-| `failed` | The provider reported a terminal failure. | Return the recorded failure; do not retry automatically. |
-
-Transitions are:
+| `submitting` | 提交前已保存请求指纹，但尚未保存 task ID。 | 停止该镜头并报告记录的错误，绝不自动重提。 |
+| `running` | 已持久化 provider task ID。 | 仅轮询该 task ID。 |
+| `download_pending` | provider 已成功并返回视频 URL，本地文件尚未确认。 | 仅下载已有结果。 |
+| `succeeded` | 文件已写入且路径已保存。 | 仅当文件存在时直接复用。 |
+| `failed` | provider 返回明确终态失败。 | 返回记录的失败，不自动重试。 |
 
 ```text
-new job -> submitting -> running -> download_pending -> succeeded
+新任务 -> submitting -> running -> download_pending -> succeeded
                          |             |
-                         +-> failed    +-> download_pending (download error)
+                         +-> failed    +-> download_pending（下载失败）
 ```
 
-Before the remote call, `submitting` is written atomically.  On a successful
-submit, the returned task ID and `running` state are written atomically before
-polling.  If submit raises or the process ends in this interval, the record stays
-`submitting`; that ambiguity is intentionally not retried because avoiding an
-extra model task is more important than guessing whether the provider accepted
-the request.
+远端调用前先原子保存 `submitting`。提交成功后，将 task ID 与 `running` 原子保存，再开始轮询。提交抛错或进程正好在此窗口中断时，记录保持 `submitting`；不猜测 provider 是否已接单，以避免重复消耗模型额度。
 
-Polling records `download_pending` as soon as the provider reports success and
-its result URL is available.  A download failure leaves that state intact for a
-later download-only recovery.  The downloaded file is written to a temporary
-path and atomically renamed before `succeeded` is persisted.
+provider 返回成功后，先保存 URL 与 `download_pending`，再下载。下载失败保持该状态，下一次仅下载。下载写入临时路径后原子重命名，最后保存 `succeeded`。
 
-`max_wait` and a transient polling error are observation failures, not provider
-terminal failures: the job remains `running`, records the last error if any, and
-can be resumed later.  Only an explicit provider failure becomes `failed`.
+`max_wait` 和临时轮询错误是本次观察失败，不是 provider 终态失败：任务保持 `running`，记录最后错误并可在之后恢复。只有 provider 明确失败才进入 `failed`。
 
-## Resume algorithm
+## 恢复算法
 
-For each selected storyboard frame, build the same effective `VideoRequest` and
-fingerprint that a new submission would use, then load its matching record:
+每个被选中的 storyboard frame 都重新构造有效 `VideoRequest` 和指纹，然后读取匹配记录：
 
-1. Matching `succeeded` with an existing file: return it without provider I/O.
-2. Matching `running`: add its persisted task ID to the poll set.
-3. Matching `download_pending`: add it to the download set.
-4. Matching `submitting` or `failed`: return its recorded non-retriable result.
-5. No matching record: append and atomically persist `submitting`, then submit.
+1. `succeeded` 且文件存在：不做 provider I/O，直接返回。
+2. `running`：加入现有 task ID 的轮询集合。
+3. `download_pending`：加入下载集合。
+4. `submitting` 或 `failed`：返回记录状态，不提交。
+5. 无匹配记录：追加并原子保存 `submitting`，然后提交。
 
-The normal execution remains batch-shaped: new jobs are submitted first,
-persisted task IDs are polled together, and completed jobs are downloaded.  The
-resume path simply feeds existing jobs into the later phases rather than calling
-`submit()` again.
+执行仍保持批处理形态：先提交新任务，再一起轮询，再下载完成任务；恢复路径仅把已有任务送入后续阶段，不会再次调用 `submit()`。
 
-## Compatibility
+## 兼容性
 
-An older manifest with no `schema_version` is treated as a legacy final summary.
-It is not used to resume an active task because it cannot prove a durable task
-ID/fingerprint pairing.  A new invocation writes the version-2 format.  The
-legacy file is first read defensively so malformed JSON produces an actionable
-error rather than being overwritten.
+没有 `schema_version` 的旧 manifest 视为旧版最终摘要，不能用来恢复活动任务，因为它无法证明 task ID 与请求指纹的配对。新执行会写入 v2 格式；读取旧文件时仍先校验 JSON，损坏文件报出带路径的可操作错误，绝不静默覆盖。
 
-## Tests
+## 验证
 
-Add offline tests in `tests/test_video_pipeline.py` using `FakeModel`:
+在 `tests/test_video_pipeline.py` 使用 `FakeModel` 覆盖：
 
-1. The manifest exists with a `running` task ID immediately after a later submit
-   failure interrupts the batch.
-2. A second identical invocation polls a persisted task ID and never calls
-   `submit()` for it.
-3. A successful existing file is reused without model calls.
-4. Provider success followed by a download error resumes as download-only.
-5. Timeout or transient poll error remains resumable rather than becoming
-   `failed`.
-6. A persisted `submitting` record never causes an automatic resubmit.
-7. Changing a prompt or request parameter produces a different fingerprint and
-   submits exactly one new task.
-8. Atomic-write failure before submit prevents the model from receiving a
-   request.
+1. 后续提交崩溃时，前一个 `running` task ID 已写入 manifest。
+2. 第二次相同执行只轮询已保存 task ID，不再提交。
+3. 已完成且文件存在的镜头不做 provider 调用。
+4. provider 成功后下载失败，下一次只下载。
+5. 超时和临时轮询错误保持可恢复，不变成 `failed`。
+6. 已保存的 `submitting` 永不自动重提。
+7. 修改提示词或请求参数会产生新指纹且只提交一次新任务。
+8. 原子写入失败时，model 不会收到请求。
 
-Run the focused pipeline tests, then the full `uv run pytest` suite and
-`git diff --check`.
+执行聚焦测试、完整 `uv run pytest` 和 `git diff --check`。
 
-## References
+## 参考资料
 
-- AWS Builders' Library, [Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
-- Stripe, [Idempotent requests](https://docs.stripe.com/api/idempotent_requests)
-- Temporal, [Activities](https://docs.temporal.io/encyclopedia/activities)
-- Google AIP-151, [Long-running operations](https://google.aip.dev/151)
+- AWS Builders' Library：[Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
+- Stripe：[Idempotent requests](https://docs.stripe.com/api/idempotent_requests)
+- Temporal：[Activities](https://docs.temporal.io/encyclopedia/activities)
+- Google AIP-151：[Long-running operations](https://google.aip.dev/151)
