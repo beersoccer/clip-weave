@@ -103,4 +103,4 @@ PROOF_MEDIA_GS_URI_TEMPLATE=gs://example-proof-media/proof/{sha256}{suffix}
 uv run pytest -q
 ```
 
-当前离线回归基线：`274 passed`。
+离线回归基线以当前 `uv run pytest -q` 输出为准。
