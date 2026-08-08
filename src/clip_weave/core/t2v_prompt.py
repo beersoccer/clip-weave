@@ -101,6 +101,8 @@ class PromptSpec:
     duration: int = 5
     ratio: str = "16:9"
     reference: str = ""          # focal asset reused as an i2v first frame
+    reference_source: str | None = None
+    reference_license: str | None = None
     reference_requirement: Literal["optional", "required"] = "optional"
     needs_review: bool = False   # graphics-heavy frame: probably belongs on the HTML path
     notes: str = ""
@@ -430,6 +432,10 @@ def render_markdown(doc: PromptDoc) -> str:
         if spec.reference:
             lines.append(f"- reference: {spec.reference}")
             lines.append(f"- reference_requirement: {spec.reference_requirement}")
+        if spec.reference_source:
+            lines.append(f"- reference_source: {spec.reference_source}")
+        if spec.reference_license:
+            lines.append(f"- reference_license: {spec.reference_license}")
         if spec.needs_review:
             lines.append(f"- needs_review: true   # {spec.notes}")
         for slot in ("subject", "action", "scene", "camera", "lighting_style", "audio", "negative"):
@@ -511,6 +517,8 @@ def parse_markdown(path: str | Path) -> PromptDoc:
             current.needs_review = value.strip().lower() in ("true", "yes", "1")
         elif key == "reference_requirement":
             current.reference_requirement = "required" if value == "required" else "optional"
+        elif key in {"reference_source", "reference_license"}:
+            setattr(current, key, value)
         elif key in {"ratio", "reference", "subject", "action", "scene", "camera",
                      "lighting_style", "audio", "negative", "title"}:
             setattr(current, key, value)
