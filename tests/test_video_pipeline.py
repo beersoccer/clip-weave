@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from clip_weave.adapters.video_gen import TaskStatus, VideoGenError
+from clip_weave.adapters.video_gen import ProviderCapabilities, TaskStatus, VideoGenError
 from clip_weave.core import video_pipeline
 from clip_weave.core.video_pipeline import ClipResult, concat_clips, generate_clips
 
@@ -44,12 +44,19 @@ class FakeModel:
         polls=None,
         poll_error=None,
         download_error=None,
+        capabilities=None,
     ):
         self.submit_error = submit_error
         self.crash_on_submit_number = crash_on_submit_number
         self.polls = polls or {}
         self.poll_error = poll_error
         self.download_error = download_error
+        self.capabilities = capabilities or ProviderCapabilities(
+            ratios=frozenset({"16:9", "9:16", "1:1"}),
+            resolutions=frozenset({"480p", "720p", "1080p"}),
+            duration_range=(5, 10),
+            reference_uri_schemes=frozenset({"http", "https"}),
+        )
         self.submitted = []
         self.polled = []
         self.downloaded = []
@@ -119,6 +126,19 @@ def test_dry_run_builds_prompts_without_a_model(tmp_path):
     assert results[0].extra["ratio"] == "16:9"
     assert results[0].duration == 5
     assert not (tmp_path / "renders").exists()  # nothing written
+
+
+def test_dry_run_never_builds_a_model_or_checks_provider_capabilities(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline,
+        "_build_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must stay offline")),
+    )
+
+    results = _run(tmp_path, dry_run=True)
+
+    assert results[0].extra["provider_capability_check"] == "not performed (dry-run)"
+    assert not (tmp_path / "renders").exists()
 
 
 def test_no_frames_raises(tmp_path):
@@ -281,6 +301,108 @@ def test_changed_request_fingerprint_submits_one_new_task(tmp_path):
     assert len(changed.submitted) == 1
     records = [clip for clip in _manifest(tmp_path)["clips"] if clip["index"] == 1]
     assert len({clip["request_fingerprint"] for clip in records}) == 2
+
+
+def test_required_local_reference_blocks_whole_batch_before_submit_or_output(tmp_path):
+    model = FakeModel()
+
+    with pytest.raises(VideoGenError, match=r"frame 2: required reference"):
+        _run(
+            tmp_path,
+            model=model,
+            reference_overrides={2: "./keyframe.png"},
+            reference_requirements={2: "required"},
+        )
+
+    assert model.submitted == []
+    assert not (tmp_path / "renders").exists()
+
+
+def test_optional_local_reference_is_dropped_with_exact_audit_in_manifest(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(),
+        frames=[1],
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "optional"},
+    )
+
+    extra = _manifest(tmp_path)["clips"][0]["extra"]
+    assert extra["reference_audit"] == {
+        "requested": "./keyframe.png",
+        "requirement": "optional",
+        "outcome": "dropped",
+        "applied": None,
+        "reason": "local reference is not materialized",
+    }
+    assert extra["requested_parameters"]["duration"] == 5
+    assert extra["applied_parameters"]["duration"] == 5
+    assert "reference_asset" not in extra
+
+
+def test_accepted_optional_reference_is_audited_and_submitted(tmp_path):
+    model = FakeModel()
+    _run(
+        tmp_path,
+        model=model,
+        frames=[1],
+        reference_overrides={1: "https://example.com/keyframe.png"},
+        reference_requirements={1: "optional"},
+    )
+
+    assert model.submitted[0].image_url == "https://example.com/keyframe.png"
+    assert _manifest(tmp_path)["clips"][0]["extra"]["reference_audit"]["outcome"] == "accepted"
+
+
+def test_reference_audit_or_capability_change_does_not_reuse_manifest(tmp_path):
+    running = FakeModel(polls={"task-1": TaskStatus(state="running", raw={})})
+    _run(
+        tmp_path,
+        model=running,
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "https://example.com/keyframe.png"},
+        reference_requirements={1: "optional"},
+    )
+
+    changed = FakeModel(
+        capabilities=ProviderCapabilities(
+            ratios=frozenset({"16:9"}),
+            resolutions=frozenset({"1080p"}),
+            duration_range=(6, 10),
+            reference_uri_schemes=frozenset(),
+        )
+    )
+    _run(
+        tmp_path,
+        model=changed,
+        frames=[1],
+        reference_overrides={1: "https://example.com/keyframe.png"},
+        reference_requirements={1: "optional"},
+    )
+
+    assert len(changed.submitted) == 1
+
+
+def test_gs_reference_is_forwarded_when_capability_supports_it(tmp_path):
+    model = FakeModel(
+        capabilities=ProviderCapabilities(
+            ratios=frozenset({"16:9"}),
+            resolutions=frozenset({"1080p"}),
+            duration_range=(5, 10),
+            reference_uri_schemes=frozenset({"gs"}),
+        )
+    )
+
+    _run(
+        tmp_path,
+        model=model,
+        frames=[1],
+        reference_overrides={1: "gs://bucket/keyframe.png"},
+        reference_requirements={1: "optional"},
+    )
+
+    assert model.submitted[0].image_url == "gs://bucket/keyframe.png"
 
 
 def test_manifest_write_failure_prevents_submit(tmp_path, monkeypatch):
@@ -561,13 +683,20 @@ def test_remote_reference_becomes_the_first_frame_image(tmp_path):
     assert model.submitted[0].image_url == "https://cdn/hero.png"
 
 
-def test_local_reference_is_recorded_but_not_sent(tmp_path):
+def test_local_reference_is_audited_but_not_sent(tmp_path):
     """A local capture path cannot be a first frame — it would need uploading."""
     model = FakeModel()
     results = _run(tmp_path, model=model, reference_overrides={1: "capture/assets/hero.png"})
 
     assert model.submitted[0].image_url is None
-    assert results[0].extra["reference_asset"] == "capture/assets/hero.png"
+    assert results[0].extra["reference_audit"] == {
+        "requested": "capture/assets/hero.png",
+        "requirement": "optional",
+        "outcome": "dropped",
+        "applied": None,
+        "reason": "local reference is not materialized",
+    }
+    assert "reference_asset" not in results[0].extra
 
 
 def test_overrides_default_to_empty_and_change_nothing(tmp_path):

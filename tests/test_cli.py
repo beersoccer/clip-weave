@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from click.testing import CliRunner
 from clip_weave.__main__ import cli
+from clip_weave.adapters.video_gen import ProviderCapabilities, TaskStatus
 
 
 def _storyboard_and_profile(tmp_path, profile: str):
@@ -220,3 +221,52 @@ def test_gen_video_no_warning_when_no_relevant_flags_passed(tmp_path):
     assert "--style" not in result.output
     assert "--include-voiceover" not in result.output
     assert "--generate-audio" not in result.output
+
+
+def test_gen_video_required_local_reference_exits_before_any_submit(tmp_path, monkeypatch):
+    storyboard = _storyboard_and_profile(tmp_path, "t2v_brand_film")
+
+    class FakeSpec:
+        index = 1
+        duration = 5
+        negative = None
+        reference = "./required-keyframe.png"
+        reference_requirement = "required"
+        needs_review = False
+        notes = ""
+
+    class FakeDoc:
+        specs = [FakeSpec()]
+
+    class FakeModel:
+        model = "fake-model"
+        capabilities = ProviderCapabilities(
+            ratios=frozenset({"16:9"}),
+            resolutions=frozenset({"1080p"}),
+            duration_range=(5, 10),
+        )
+
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, request):
+            self.submitted.append(request)
+            return "task-1"
+
+        def poll(self, task_id):
+            return TaskStatus(state="succeeded", raw={})
+
+        def download(self, status, dest):
+            dest.write_bytes(b"video")
+
+    model = FakeModel()
+    monkeypatch.setattr("clip_weave.core.video_pipeline._build_model", lambda *_args, **_kwargs: model)
+    with patch(
+        "clip_weave.core.t2v_prompt.load_or_create",
+        return_value=(FakeDoc(), tmp_path / "T2V-PROMPTS.md", False),
+    ), patch("clip_weave.core.t2v_prompt.literal_prompt", return_value="p"):
+        result = CliRunner().invoke(cli, ["gen-video", str(storyboard), "--provider", "doubao"])
+
+    assert result.exit_code == 1
+    assert "frame 1: required reference" in result.output
+    assert model.submitted == []
