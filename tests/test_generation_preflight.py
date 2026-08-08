@@ -137,6 +137,23 @@ def test_malformed_reference_uri_is_reported_as_video_gen_error() -> None:
 
 
 @pytest.mark.parametrize(
+    "reference",
+    [
+        "http://example.com:bad/path",
+        "http://example.com:99999/path",
+    ],
+)
+def test_invalid_reference_uri_port_is_reported_as_video_gen_error(reference: str) -> None:
+    with pytest.raises(VideoGenError, match=r"optional reference.*cannot be parsed"):
+        preflight_request(
+            VideoRequest(prompt="city"),
+            capabilities(),
+            reference=reference,
+            reference_requirement=None,
+        )
+
+
+@pytest.mark.parametrize(
     ("video_request", "match"),
     [
         (VideoRequest(prompt="city", ratio="1:1"), r"ratio.*1:1.*16:9"),

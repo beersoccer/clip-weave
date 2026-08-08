@@ -68,7 +68,9 @@ def _audit_reference(
 
     effective_requirement: ReferenceRequirement = requirement or "optional"
     try:
-        scheme = urlparse(reference).scheme.lower()
+        parsed = urlparse(reference)
+        scheme = parsed.scheme.lower()
+        parsed.port
     except ValueError as error:
         raise VideoGenError(
             f"{effective_requirement} reference {reference!r} cannot be parsed: {error}"
