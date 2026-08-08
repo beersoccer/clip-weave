@@ -134,7 +134,27 @@ def test_ali_legacy_capabilities_match_the_size_table_and_have_no_reference_supp
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5-t2v-preview"))
     assert vm.capabilities.ratios == frozenset({"16:9", "9:16", "1:1", "4:3", "3:4"})
     assert vm.capabilities.resolutions == frozenset({"480p", "720p", "1080p"})
+    assert vm.capabilities.supported_resolution_ratios == frozenset({
+        ("480p", "16:9"), ("480p", "9:16"), ("480p", "1:1"),
+        ("720p", "16:9"), ("720p", "9:16"), ("720p", "1:1"),
+        ("720p", "4:3"), ("720p", "3:4"),
+        ("1080p", "16:9"), ("1080p", "9:16"), ("1080p", "1:1"),
+        ("1080p", "4:3"), ("1080p", "3:4"),
+    })
+    assert ("480p", "4:3") not in vm.capabilities.supported_resolution_ratios
     assert vm.capabilities.reference_uri_schemes == frozenset()
+
+
+def test_ali_wan27_capabilities_declare_known_resolution_ratio_pairs():
+    vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.7-t2v"))
+    assert vm.capabilities.resolutions == frozenset({"720p", "1080p"})
+    assert vm.capabilities.ratios == frozenset({"16:9", "9:16", "1:1", "4:3", "3:4"})
+    assert vm.capabilities.supported_resolution_ratios == frozenset({
+        ("720p", "16:9"), ("720p", "9:16"), ("720p", "1:1"),
+        ("720p", "4:3"), ("720p", "3:4"),
+        ("1080p", "16:9"), ("1080p", "9:16"), ("1080p", "1:1"),
+        ("1080p", "4:3"), ("1080p", "3:4"),
+    })
 
 
 def test_vertex_declares_veo_capabilities():
@@ -256,7 +276,7 @@ def test_ali_legacy_rejects_unknown_size_combination_without_fallback():
     session = FakeSession(FakeResponse({"output": {"task_id": "t"}}))
     vm = AliVideoModel(_cfg("ali", "http://gw/a", "wan2.5"), session=session)
     with pytest.raises(VideoGenError, match="unsupported legacy size combination"):
-        vm.submit(VideoRequest(prompt="p", ratio="21:9", resolution="480p"))
+        vm.submit(VideoRequest(prompt="p", ratio="4:3", resolution="480p"))
     assert session.calls == []
 
 
@@ -338,11 +358,12 @@ def test_vertex_model_path_override_skips_project_requirement():
     assert session.calls[0]["url"] == "http://gw/v/v1/custom/path/model:predictLongRunning"
 
 
-def test_vertex_preserves_ratio_for_preflight_to_validate():
+def test_vertex_rejects_unsupported_ratio_before_sending_http():
     session = FakeSession(FakeResponse({"name": "op"}))
     vm = VertexVideoModel(_cfg("vertex", "http://gw/v", "veo-3.1", PROJECT="p"), session=session)
-    vm.submit(VideoRequest(prompt="p", ratio="1:1"))
-    assert session.calls[0]["json"]["parameters"]["aspectRatio"] == "1:1"
+    with pytest.raises(VideoGenError, match="vertex: unsupported ratio 1:1.*16:9.*9:16"):
+        vm.submit(VideoRequest(prompt="p", ratio="1:1"))
+    assert session.calls == []
 
 
 def test_vertex_submit_without_operation_name_raises():

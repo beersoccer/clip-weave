@@ -104,6 +104,7 @@ class ProviderCapabilities:
     resolutions: frozenset[str]
     duration_range: tuple[int, int]
     duration_choices: tuple[int, ...] | None = None
+    supported_resolution_ratios: frozenset[tuple[str, str]] | None = None
     reference_uri_schemes: frozenset[str] = frozenset()
 
 

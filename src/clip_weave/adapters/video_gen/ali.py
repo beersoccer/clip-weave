@@ -57,6 +57,12 @@ _SIZE_TABLE = {
 }
 _LEGACY_RATIOS = frozenset(ratio for _, ratio in _SIZE_TABLE)
 _LEGACY_RESOLUTIONS = frozenset(resolution for resolution, _ in _SIZE_TABLE)
+_LEGACY_RESOLUTION_RATIOS = frozenset(_SIZE_TABLE)
+_WAN27_RESOLUTION_RATIOS = frozenset(
+    pair for pair in _SIZE_TABLE if pair[0] in {"720p", "1080p"}
+)
+_WAN27_RATIOS = frozenset(ratio for _, ratio in _WAN27_RESOLUTION_RATIOS)
+_WAN27_RESOLUTIONS = frozenset(resolution for resolution, _ in _WAN27_RESOLUTION_RATIOS)
 
 
 def load_config() -> ProviderConfig:
@@ -80,16 +86,19 @@ class AliVideoModel(VideoModel):
     @property
     def capabilities(self) -> ProviderCapabilities:
         if self._wan27:
-            ratios = frozenset()
-            resolutions = frozenset()
+            ratios = _WAN27_RATIOS
+            resolutions = _WAN27_RESOLUTIONS
+            supported_resolution_ratios = _WAN27_RESOLUTION_RATIOS
         else:
             ratios = _LEGACY_RATIOS
             resolutions = _LEGACY_RESOLUTIONS
+            supported_resolution_ratios = _LEGACY_RESOLUTION_RATIOS
         return ProviderCapabilities(
             ratios=ratios,
             resolutions=resolutions,
             duration_range=self.duration_range,
             duration_choices=self.duration_choices,
+            supported_resolution_ratios=supported_resolution_ratios,
         )
 
     @property

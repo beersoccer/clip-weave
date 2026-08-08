@@ -96,6 +96,13 @@ class VertexVideoModel(VideoModel):
         return f"{self.cfg.base_url}/{version}/{self._model_path}:{verb}"
 
     def submit(self, req: VideoRequest) -> str:
+        capabilities = self.capabilities
+        if req.ratio not in capabilities.ratios:
+            supported = ", ".join(sorted(capabilities.ratios))
+            raise VideoGenError(
+                f"vertex: unsupported ratio {req.ratio}; supported ratios: {supported}"
+            )
+
         instance: dict[str, Any] = {"prompt": req.prompt}
         if req.image_url:
             instance["image"] = {"gcsUri": req.image_url, "mimeType": "image/png"}
