@@ -44,7 +44,7 @@ class ProviderCapabilities:
     resolutions: frozenset[str]
     duration_range: tuple[int, int]
     duration_choices: tuple[int, ...] | None = None
-    supports_remote_image_url: bool = False
+    reference_uri_schemes: frozenset[str] = frozenset()
 ```
 
 每个 `VideoModel` 通过只读 `capabilities` 属性返回能力声明。`duration_range` 和 `duration_choices` 与现有 `clamp_duration()` 保持一致；没有声明的参数不允许在 preflight 中猜测或回退。
@@ -83,8 +83,8 @@ def preflight_request(
 1. 比例和分辨率必须属于 `capabilities` 的集合；不静默替换。
 2. 时长先沿用当前 `clamp_duration()` 的确定性归一化；审计中同时保存原始 requested duration 和 applied duration。若 capability 声明不完整或归一化结果不在声明集合内，失败。
 3. 空参考产生 `not_requested`，`image_url` 保持空。
-4. HTTP(S) 参考且 provider 支持远程首帧时产生 `accepted`，将 URL 放入 `image_url`。
-5. HTTP(S) 参考但 provider 不支持时：`required` 产生 `blocked` 并失败；`optional` 产生 `dropped`，`image_url` 为空，继续生成。
+4. URI scheme 属于 `reference_uri_schemes` 的远程参考产生 `accepted`，将原始 URI 放入 `image_url`。例如豆包声明 `http`/`https`，Vertex 声明 `gs`；本任务不假设所有 provider 使用相同的远程 URI 格式。
+5. 远程 URI 的 scheme 不被 provider 支持时：`required` 产生 `blocked` 并失败；`optional` 产生 `dropped`，`image_url` 为空，继续生成。
 6. 本地路径不能在本任务中物化为 provider 可读 URI：`required` 产生 `blocked` 并失败；`optional` 产生 `dropped` 并继续。审计 reason 必须明确为“本地参考尚未物化”。
 7. `reference_requirement` 由 `T2V-PROMPTS.md` 新增的可选字段 `reference_requirement` 读取，允许值为 `optional` 或 `required`；存在 `reference` 而没有该字段时默认为 `optional`，以保持现有 storyboard 的兼容性。
 
@@ -114,7 +114,7 @@ def preflight_request(
 
 - 所有错误使用 `VideoGenError`，错误文本包含镜头号、字段、requested 值、provider 和明确修正路径。
 - 为防止部分批次已提交，预检必须先处理全部 selected frames，只有全部通过才进入现有 submit/resume 循环。
-- `--dry-run` 仍执行 preflight，确保预览与真实提交有相同的支持边界；它不写 manifest，也不调用 provider。
+- `--dry-run` 保持当前“不构造 provider、不写 manifest、不调用 provider”的离线预览契约；它只显示待生成请求，并明确标注未做 provider capability 校验。真实提交路径必须在 `submit()` 前完成预检。
 - 当前本地参考的“记录但不发送”兼容行为改为显式 optional `dropped` 审计，不再留下误导性的 `reference_asset` 成功语义。
 
 ## 验收与测试
