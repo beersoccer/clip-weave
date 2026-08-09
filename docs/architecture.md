@@ -63,6 +63,7 @@ manifest 是版本化的耐久状态记录。它为每个选中镜头保存规�
 | 分镜与提示词 | `core/storyboard.py`、`core/t2v_prompt.py` | 解析、生成、人工可编辑提示词 |
 | T2V 预检 | `core/generation_preflight.py` | 纯本地 capability 校验、参数归一化、reference 审计；非完整质量 Gate |
 | 本地 proof media | `core/proof_media.py` | 按配置的 provider scheme 上传本地 reference，并维护项目级去重 ledger |
+| 生产契约账本 | `core/production_contract.py`、`renders/production-contract.json` | 冻结 Creative Contract、Facts Source、Reference Audit、Shot Card、Cue Sheet 和 Review Decision 的完整快照；提供追加 revision、读取当前与历史 revision 的 API；当前未接入 submit 或 manifest |
 | T2V 执行 | `core/video_pipeline.py`、`adapters/video_gen/` | 在 batch 预检和本地 reference 物化通过后执行异步任务、下载、合流 |
 | 素材理解 | `adapters/asset_matcher.py` | 描述增强与匹配 |
 | 确定性渲染 | `adapters/hyperframes.py` | 调用 HyperFrames CLI |
@@ -74,6 +75,8 @@ manifest 是版本化的耐久状态记录。它为每个选中镜头保存规�
 当前实现将每镜头 task id、状态、下载来源（URL 或内联内容的短生命周期 sidecar）、路径、错误、请求指纹，以及 requested/applied parameters 和 reference audit 写入 `manifest.json`，并在状态变化时原子持久化。本地 reference 的独立去重 ledger 为 `renders/proof-media.json`；支持的远程 URI 不会被上传或改写，也不做远程 capability discovery。恢复以相同请求指纹为边界，目标是避免本地重复提交；它不提供 provider 端 exactly-once，也没有自动重试，不会自动重新提交 `submitting` 或 `failed` 记录。
 
 当前实现不提供视频下载产物 artifact hash 或媒体 QC；本地 proof media 的 SHA-256 只用于上传去重。文件类型、大小、哈希、`ffprobe` 时长/分辨率/fps/音轨探测仍是后续交付检查。上述纯本地 G0 预检不能替代完整的 G0-G4 质量系统，也不等同于提升审美质量。
+
+生产契约账本目前不记录 artifact hash、不实现自动重试或 provider 端 exactly-once；现有 manifest 尚无 contract_revision，且生产契约当前未接入 submit 或 manifest。
 
 ## 5. 质量演进原则
 
