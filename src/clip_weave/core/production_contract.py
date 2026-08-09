@@ -61,7 +61,7 @@ class CreativeContract:
     production_profile: str
     audience: str
     platform: str
-    target_duration_seconds: float
+    target_duration_seconds: int
     narrative_promise: str
     must_keep: tuple[str, ...]
     must_not: tuple[str, ...]
@@ -70,7 +70,7 @@ class CreativeContract:
         _choice(self.production_profile, "production_profile", {"html_launch", "t2v_brand_film"})
         _text(self.audience, "audience")
         _text(self.platform, "platform")
-        _positive(self.target_duration_seconds, "target_duration_seconds")
+        _positive_int(self.target_duration_seconds, "target_duration_seconds")
         _text(self.narrative_promise, "narrative_promise")
         _text_tuple(self.must_keep, "must_keep")
         _text_tuple(self.must_not, "must_not")
