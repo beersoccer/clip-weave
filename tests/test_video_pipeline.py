@@ -4,6 +4,7 @@ generate_clips() accepts `model=`, so every test injects a FakeModel and no
 network, ffmpeg binary, or gateway is touched.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -180,6 +181,14 @@ def test_manifest_records_run_metadata(tmp_path):
     assert manifest["ratio"] == "16:9"
     assert len(manifest["clips"]) == 2
     assert manifest["clips"][0]["state"] == "succeeded"
+
+
+def test_successful_download_records_artifact_hash_in_result_and_manifest(tmp_path):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    expected = hashlib.sha256(b"fake mp4 bytes").hexdigest()
+    assert results[0].artifact_sha256 == expected
+    assert _manifest(tmp_path)["clips"][0]["artifact_sha256"] == expected
 
 
 def test_manifest_is_written_before_a_later_submit_crashes(tmp_path):
@@ -681,6 +690,21 @@ def test_download_failure_stays_download_pending_and_resumes_without_submit(tmp_
     assert [result.state for result in results] == ["succeeded"]
     assert resumed.submitted == []
     assert resumed.downloaded
+
+
+def test_hash_failure_stays_download_pending_without_artifact_hash(tmp_path, monkeypatch):
+    def fail_hash(_path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(video_pipeline, "_sha256_file", fail_hash, raising=False)
+
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    assert results[0].state == "download_pending"
+    assert results[0].artifact_sha256 is None
+    record = _manifest(tmp_path)["clips"][0]
+    assert record["state"] == "download_pending"
+    assert record["artifact_sha256"] is None
 
 
 def test_inline_video_result_resumes_download_without_polling(tmp_path):

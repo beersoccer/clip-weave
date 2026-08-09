@@ -83,6 +83,7 @@ class ClipResult:
     task_id: str | None = None
     state: str = "pending"
     video_path: str | None = None
+    artifact_sha256: str | None = None
     video_url: str | None = None
     inline_payload_path: str | None = None
     error: str | None = None
@@ -122,6 +123,14 @@ def _proof_media_identity(snapshot: dict[str, object]) -> dict[str, object]:
 def _fingerprint_reference_audit(audit: dict[str, object]) -> dict[str, object]:
     """Exclude the local provenance path from durable provider task identity."""
     return {key: value for key, value in audit.items() if key != "requested"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
@@ -208,6 +217,7 @@ def _clip_from_record(record: dict[str, Any], manifest_path: Path) -> ClipResult
             task_id=record.get("task_id"),
             state=str(record.get("state") or "pending"),
             video_path=record.get("video_path"),
+            artifact_sha256=record.get("artifact_sha256"),
             video_url=record.get("video_url"),
             inline_payload_path=record.get("inline_payload_path"),
             error=record.get("error"),
@@ -262,9 +272,11 @@ def _download_clip(
     try:
         vm.download(status, temp)
         os.replace(temp, dest)
+        result.artifact_sha256 = _sha256_file(dest)
     except Exception as exc:  # noqa: BLE001 - download/IO surface
         temp.unlink(missing_ok=True)
         result.state = "download_pending"
+        result.artifact_sha256 = None
         result.error = f"download failed: {exc}"
         _persist_clip(manifest_path, manifest, result)
         logger.error("frame %s download failed: %s", result.index, exc)
