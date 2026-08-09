@@ -143,10 +143,30 @@ def _artifact_hash_matches(result: ClipResult) -> bool:
         and result.video_path
     ):
         return False
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        return False
+
+    fd: int | None = None
     try:
-        path = Path(result.video_path)
-        return stat.S_ISREG(path.lstat().st_mode) and _sha256_file(path) == artifact_sha256
+        fd = os.open(result.video_path, os.O_RDONLY | nofollow)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            fd = None
+            return False
+
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == artifact_sha256
     except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         return False
 
 

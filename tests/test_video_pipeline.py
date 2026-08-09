@@ -5,8 +5,10 @@ network, ffmpeg binary, or gateway is touched.
 """
 
 import hashlib
+import errno
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -236,6 +238,44 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
     assert resumed.downloaded == []
 
 
+def test_artifact_hash_revalidation_opens_the_same_nofollow_file_descriptor(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+    flags_seen = []
+    original_open = os.open
+
+    def capture_open(path, flags, *args, **kwargs):
+        flags_seen.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(video_pipeline.os, "open", capture_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is True
+    assert flags_seen
+    assert flags_seen[0] & os.O_NOFOLLOW
+
+
+def test_artifact_hash_revalidation_rejects_symlink_open_error(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    def reject_open(*_args, **_kwargs):
+        raise OSError(errno.ELOOP, "symlink detected")
+
+    monkeypatch.setattr(video_pipeline.os, "open", reject_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+
+
+def test_artifact_hash_revalidation_rejects_non_regular_descriptor(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    def fifo_stat(_fd):
+        return os.stat_result((stat.S_IFIFO,) + (0,) * 9)
+
+    monkeypatch.setattr(video_pipeline.os, "fstat", fifo_stat)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+
+
 def test_completed_symlink_is_not_reused_even_when_artifact_hash_matches(tmp_path):
     _run(tmp_path, model=FakeModel(), frames=[1])
     video_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
@@ -346,17 +386,23 @@ def test_completed_file_with_invalid_artifact_hash_redownloads_without_submit(
     assert resumed.downloaded
 
 
-def test_completed_file_with_unreadable_hash_redownloads_without_submit(tmp_path, monkeypatch):
+def test_completed_file_with_unreadable_artifact_redownloads_without_submit(tmp_path, monkeypatch):
     _run(tmp_path, model=FakeModel(), frames=[1])
+    original_open = os.open
+    calls = 0
 
-    def fail_hash(_path):
-        raise OSError("read failed")
+    def fail_revalidation_open(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("read failed")
+        return original_open(*args, **kwargs)
 
-    monkeypatch.setattr(video_pipeline, "_sha256_file", fail_hash)
+    monkeypatch.setattr(video_pipeline.os, "open", fail_revalidation_open)
     resumed = FakeModel()
     results = _run(tmp_path, model=resumed, frames=[1])
 
-    assert [result.state for result in results] == ["download_pending"]
+    assert [result.state for result in results] == ["succeeded"]
     assert resumed.submitted == []
     assert resumed.polled == []
     assert resumed.downloaded

@@ -57,7 +57,7 @@ def test_downloaded_clip_records_artifact_sha256(tmp_path):
 - Modify: `docs/architecture.md:75-79`
 - Modify: `docs/production-quality-loop.md:121-126`
 
-- [ ] `architecture.md` 说明下载成功记录 SHA-256，恢复重新验证，缺失/非法/不匹配只按下载 URL、inline payload 或 task id 恢复且不重新 submit；明确没有媒体 QC。
-- [ ] `production-quality-loop.md` 的 G1 只称已实现下载 SHA-256，明确 `ffprobe`、候选评分和媒体 QC 仍未实现。
-- [ ] 运行 `UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run --extra dev pytest -q`、`UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run python -m clip_weave --help`、`git diff --check`、`git status --short --branch`；预期 pytest 全绿、CLI 返回 0、diff 无输出、状态只含本任务变更。
-- [ ] 提交：`git add docs/architecture.md docs/production-quality-loop.md`，随后 `git commit -m "docs: describe artifact integrity checks"`。
+- [x] `architecture.md` 说明下载成功记录 SHA-256，恢复重新验证，缺失/非法/不匹配只按下载 URL、inline payload 或 task id 恢复且不重新 submit；明确没有媒体 QC。
+- [x] `production-quality-loop.md` 的 G1 只称已实现下载 SHA-256，明确 `ffprobe`、候选评分和媒体 QC 仍未实现。
+- [x] 运行 `UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run --extra dev pytest -q`、`UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run python -m clip_weave --help`、`git diff --check`、`git status --short --branch`；预期 pytest 全绿、CLI 返回 0、diff 无输出、状态只含本任务变更。
+- [x] 提交：`git add docs/architecture.md docs/production-quality-loop.md`，随后 `git commit -m "docs: describe artifact integrity checks"`。
