@@ -272,6 +272,27 @@ def test_completed_file_with_mismatched_artifact_hash_redownloads_without_submit
     assert resumed.downloaded
 
 
+def test_integrity_recovery_preserves_existing_artifact_at_standard_path(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    standard_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    standard_path.write_bytes(b"user content")
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    manifest_path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.downloaded
+    assert standard_path.read_bytes() == b"user content"
+    assert results[0].video_path != str(standard_path)
+    recovered_path = Path(results[0].video_path)
+    assert recovered_path.is_file()
+    assert results[0].artifact_sha256 == hashlib.sha256(recovered_path.read_bytes()).hexdigest()
+
+
 @pytest.mark.parametrize("artifact_sha256", [None, "not-a-sha", "A" * 64])
 def test_completed_file_with_invalid_artifact_hash_redownloads_without_submit(
     tmp_path, artifact_sha256

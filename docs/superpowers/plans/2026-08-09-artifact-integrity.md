@@ -45,6 +45,8 @@ def test_downloaded_clip_records_artifact_sha256(tmp_path):
 - [ ] 用 helper 替换 `existing.state == "succeeded"` 的仅存在性复用判断。失败时清空 `video_path`/`artifact_sha256`，记录 `artifact integrity check failed` 并持久化；有 `video_url` 或 inline payload 则 `download_pending`，否则有 `task_id` 则 `running`，无来源则 `failed`。每种情况持久化或更新既有记录且绝不进入 submit 分支。
 - [ ] 运行 hash mismatch 测试，预期 PASS。
 - [ ] 添加参数化测试 `None`、`"not-a-sha"`、`"A" * 64`；均须只下载、不 submit。添加读取 `OSError`、仅 task id（只 poll）、无来源（failed 且含 integrity error）测试。
+- [ ] 添加回归测试：首次下载后将标准 `.mp4` 改为用户内容并篡改 manifest hash；恢复运行必须无 submit 且发生 download，标准路径字节不变，新成功记录使用存在且 hash 匹配的 recovered 路径。
+- [ ] 在 `_download_clip()` 前提取安全目标选择 helper：标准 `{index:02d}-{slug}.mp4` 不存在时仍使用它；如标准或任一 `{stem}.recovered-{n}{suffix}` 候选已存在（包含悬空符号链接），选择同目录第一个未占用的 `recovered-{n}`。临时文件以所选目标为准，绝不覆盖、移动或删除任何已有候选。
 - [ ] 运行 `UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run --extra dev pytest tests/test_video_pipeline.py -q`，预期 PASS；提交 `git add src/clip_weave/core/video_pipeline.py tests/test_video_pipeline.py`，随后 `git commit -m "fix: verify artifact hashes before reuse"`。
 
 ### Task 3: 文档与全量验证

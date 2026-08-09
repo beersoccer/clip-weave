@@ -150,6 +150,21 @@ def _artifact_hash_matches(result: ClipResult) -> bool:
         return False
 
 
+def _download_destination(out: Path, index: int, slug: str) -> Path:
+    """Choose a destination without replacing an existing artifact."""
+    standard = out / f"{index:02d}-{slug}.mp4"
+    if not os.path.lexists(standard):
+        return standard
+
+    for number in range(1, 1_000_000):
+        recovered = standard.with_name(
+            f"{standard.stem}.recovered-{number}{standard.suffix}"
+        )
+        if not os.path.lexists(recovered):
+            return recovered
+    raise VideoGenError(f"no available recovery destination for frame {index} in {out}")
+
+
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
@@ -284,7 +299,7 @@ def _download_clip(
     manifest: dict[str, Any],
     report: Reporter,
 ) -> None:
-    dest = out / f"{result.index:02d}-{_slug_for(storyboard, result.index)}.mp4"
+    dest = _download_destination(out, result.index, _slug_for(storyboard, result.index))
     temp = dest.with_suffix(dest.suffix + ".part")
     try:
         vm.download(status, temp)

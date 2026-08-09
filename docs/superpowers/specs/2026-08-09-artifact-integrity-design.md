@@ -59,6 +59,7 @@ download_pending
 - manifest 中的 hash 必须为 64 个小写十六进制字符；任何其他值等同于缺失，不做宽松兼容。
 - 写入到 `.part` 或原子替换失败沿用现有 `download_pending` 恢复语义；成功改名后 hash 计算失败同样不能将该 clip 标记为 `succeeded`。
 - 不删除 hash 不匹配的既有 `.mp4`，以免删除用户文件；只清除本次内存/manifest 记录中的可复用声明。
+- 完整性失败后若可重新下载，标准路径或任一已尝试的恢复候选路径已存在（包括悬空符号链接）时，下载写入同目录第一个未占用的 `{stem}.recovered-{n}{suffix}`，`n` 从 1 递增；绝不覆盖、移动或删除既有文件。仅当标准 `{index:02d}-{slug}.mp4` 不存在时才继续使用它。
 - 旧 schema v2 manifest 不升级 schema version；`artifact_sha256` 是向后兼容的可选字段。缺失字段使旧成功记录在下次运行时重新下载或轮询，而不是被当作可信。
 
 ## 测试与验收
@@ -71,3 +72,4 @@ download_pending
 4. 文件缺失、目录路径、读取错误和无恢复来源均不产生新的 provider submit；状态与错误可恢复且可解释。
 5. hash 计算失败或 hash 写入前 manifest 持久化失败不会产生包含 `artifact_sha256` 的 `succeeded` 记录。
 6. 完整 `uv run --extra dev pytest -q`、`uv run python -m clip_weave --help`、`git diff --check` 均通过。
+7. 完整性失败的恢复下载不得覆盖标准路径的既有用户文件；新产物必须记录到未占用的 recovered 路径并重新 hash。
