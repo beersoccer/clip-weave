@@ -293,6 +293,40 @@ def test_integrity_recovery_preserves_existing_artifact_at_standard_path(tmp_pat
     assert results[0].artifact_sha256 == hashlib.sha256(recovered_path.read_bytes()).hexdigest()
 
 
+def test_recovery_download_does_not_replace_concurrent_destination(tmp_path, monkeypatch):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    standard_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    standard_path.write_bytes(b"user content")
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    manifest_path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    original_link = video_pipeline.os.link
+    concurrent_path = standard_path.with_name("01-开场.recovered-1.mp4")
+    calls = 0
+
+    def race_link(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            Path(destination).write_bytes(b"concurrent content")
+            raise FileExistsError
+        return original_link(source, destination)
+
+    monkeypatch.setattr(video_pipeline.os, "link", race_link)
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.downloaded
+    assert calls == 2
+    assert concurrent_path.read_bytes() == b"concurrent content"
+    assert results[0].video_path == str(
+        standard_path.with_name("01-开场.recovered-2.mp4")
+    )
+
+
 @pytest.mark.parametrize("artifact_sha256", [None, "not-a-sha", "A" * 64])
 def test_completed_file_with_invalid_artifact_hash_redownloads_without_submit(
     tmp_path, artifact_sha256

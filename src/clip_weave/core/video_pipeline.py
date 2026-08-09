@@ -299,20 +299,36 @@ def _download_clip(
     manifest: dict[str, Any],
     report: Reporter,
 ) -> None:
-    dest = _download_destination(out, result.index, _slug_for(storyboard, result.index))
-    temp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        vm.download(status, temp)
-        os.replace(temp, dest)
-        result.artifact_sha256 = _sha256_file(dest)
-    except Exception as exc:  # noqa: BLE001 - download/IO surface
-        temp.unlink(missing_ok=True)
-        result.state = "download_pending"
-        result.artifact_sha256 = None
-        result.error = f"download failed: {exc}"
-        _persist_clip(manifest_path, manifest, result)
-        logger.error("frame %s download failed: %s", result.index, exc)
-        return
+    slug = _slug_for(storyboard, result.index)
+    while True:
+        dest = _download_destination(out, result.index, slug)
+        temp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=dest.parent,
+                prefix=f".{dest.name}-",
+                suffix=".part",
+                delete=False,
+            ) as handle:
+                temp = Path(handle.name)
+            vm.download(status, temp)
+            try:
+                os.link(temp, dest)
+            except FileExistsError:
+                temp.unlink(missing_ok=True)
+                continue
+            temp.unlink()
+            result.artifact_sha256 = _sha256_file(dest)
+        except Exception as exc:  # noqa: BLE001 - download/IO surface
+            if temp:
+                temp.unlink(missing_ok=True)
+            result.state = "download_pending"
+            result.artifact_sha256 = None
+            result.error = f"download failed: {exc}"
+            _persist_clip(manifest_path, manifest, result)
+            logger.error("frame %s download failed: %s", result.index, exc)
+            return
+        break
     result.state = "succeeded"
     result.video_path = str(dest)
     result.error = None
