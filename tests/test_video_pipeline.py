@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from clip_weave.adapters.video_gen import ProviderCapabilities, TaskStatus, VideoGenError
-from clip_weave.core import video_pipeline
+from clip_weave.core import proof_media, video_pipeline
+from clip_weave.core.proof_media import ResolvedReference
 from clip_weave.core.video_pipeline import ClipResult, concat_clips, generate_clips
 
 STORYBOARD = """---
@@ -326,7 +327,224 @@ def test_required_local_reference_blocks_whole_batch_before_submit_or_output(tmp
     assert not (tmp_path / "renders").exists()
 
 
-def test_optional_local_reference_is_dropped_with_exact_audit_in_manifest(tmp_path):
+def test_required_local_reference_materializes_before_submit_and_records_proof_media(tmp_path, monkeypatch):
+    source = tmp_path / "keyframe.png"
+    source.write_bytes(b"proof")
+    resolved = ResolvedReference(
+        requested="./keyframe.png",
+        applied="https://cdn.example/keyframe.png",
+        proof_media={"sha256": "a" * 64, "uri": "https://cdn.example/keyframe.png", "scheme": "https", "source": "./keyframe.png"},
+    )
+    monkeypatch.setattr(video_pipeline, "materialize_reference", lambda *args, **kwargs: resolved)
+    model = FakeModel()
+
+    _run(
+        tmp_path,
+        model=model,
+        frames=[1],
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert model.submitted[0].image_url == "https://cdn.example/keyframe.png"
+    extra = _manifest(tmp_path)["clips"][0]["extra"]
+    assert extra["proof_media"] == resolved.proof_media
+    assert extra["reference_audit"]["requested"] == "./keyframe.png"
+    assert extra["reference_audit"]["applied"] == "https://cdn.example/keyframe.png"
+
+
+def test_materialize_reference_selects_supported_store_scheme_and_records_provenance(tmp_path, monkeypatch):
+    source = tmp_path / "assets" / "keyframe.png"
+    source.parent.mkdir()
+    source.write_bytes(b"proof")
+    monkeypatch.setenv("PROOF_MEDIA_HTTPS_UPLOAD_URL_TEMPLATE", "https://upload.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_HTTPS_URI_TEMPLATE", "https://cdn.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_GS_UPLOAD_URL_TEMPLATE", "https://upload.example/{sha256}{suffix}")
+    monkeypatch.setenv("PROOF_MEDIA_GS_URI_TEMPLATE", "gs://proof-bucket/{sha256}{suffix}")
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    uploads = []
+    monkeypatch.setattr(
+        proof_media.requests,
+        "put",
+        lambda url, *, data, headers: uploads.append((url, data.read(), headers)) or Response(),
+    )
+
+    resolved = proof_media.materialize_reference(
+        "assets/keyframe.png",
+        project_dir=tmp_path,
+        supported_schemes=frozenset({"gs"}),
+        source_note="Wikimedia Commons",
+        license_note="CC BY 4.0",
+    )
+
+    assert resolved.applied and resolved.applied.startswith("gs://proof-bucket/")
+    assert resolved.proof_media and resolved.proof_media["scheme"] == "gs"
+    assert resolved.proof_media["source_note"] == "Wikimedia Commons"
+    assert resolved.proof_media["license_note"] == "CC BY 4.0"
+    assert uploads and uploads[0][1] == b"proof"
+    ledger = json.loads((tmp_path / "renders" / "proof-media.json").read_text())
+    assert ledger["records"] == [
+        {
+            "source": "assets/keyframe.png",
+            "sha256": resolved.proof_media["sha256"],
+            "suffix": ".png",
+            "uri": resolved.applied,
+            "scheme": "gs",
+            "source_note": "Wikimedia Commons",
+            "license_note": "CC BY 4.0",
+            "created_at": ledger["records"][0]["created_at"],
+        }
+    ]
+
+
+def test_required_materialization_error_blocks_entire_batch_before_submit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda *args, **kwargs: (_ for _ in ()).throw(VideoGenError("proof media configuration is missing")),
+    )
+    model = FakeModel()
+
+    with pytest.raises(VideoGenError, match=r"frame 1: required reference materialization failed"):
+        _run(
+            tmp_path,
+            model=model,
+            reference_overrides={1: "./keyframe.png"},
+            reference_requirements={1: "required"},
+        )
+
+    assert model.submitted == []
+
+
+def test_supported_remote_reference_skips_materialization(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not materialize remote URI")),
+    )
+    model = FakeModel()
+
+    _run(tmp_path, model=model, frames=[1], reference_overrides={1: "https://cdn.example/keyframe.png"})
+
+    assert model.submitted[0].image_url == "https://cdn.example/keyframe.png"
+
+
+def test_changed_proof_media_snapshot_does_not_reuse_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "keyframe.png"
+    source.write_bytes(b"proof")
+    snapshots = iter((
+        {"sha256": "a" * 64, "uri": "https://cdn.example/a.png", "scheme": "https", "source": "./keyframe.png"},
+        {"sha256": "b" * 64, "uri": "https://cdn.example/b.png", "scheme": "https", "source": "./keyframe.png"},
+    ))
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(reference, (snapshot := next(snapshots))["uri"], snapshot),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1], max_wait=0,
+        reference_overrides={1: "./keyframe.png"}, reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path, model=changed, frames=[1], reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert len(changed.submitted) == 1
+
+
+def test_changed_proof_media_provenance_does_not_change_request_fingerprint(tmp_path, monkeypatch):
+    snapshots = iter((
+        {
+            "sha256": "a" * 64,
+            "uri": "https://cdn.example/keyframe.png",
+            "scheme": "https",
+            "source": "./keyframe.png",
+            "source_note": "Wikimedia Commons",
+            "license_note": "CC BY 4.0",
+        },
+        {
+            "sha256": "a" * 64,
+            "uri": "https://cdn.example/keyframe.png",
+            "scheme": "https",
+            "source": "./keyframe.png",
+            "source_note": "Company archive",
+            "license_note": "Internal use",
+        },
+    ))
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(reference, (snapshot := next(snapshots))["uri"], snapshot),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path,
+        model=changed,
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "./keyframe.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert changed.submitted == []
+
+
+def test_changed_local_reference_path_with_same_materialized_media_reuses_manifest(tmp_path, monkeypatch):
+    media_identity = {
+        "sha256": "a" * 64,
+        "uri": "https://cdn.example/keyframe.png",
+        "scheme": "https",
+    }
+    monkeypatch.setattr(
+        video_pipeline,
+        "materialize_reference",
+        lambda reference, **kwargs: ResolvedReference(
+            reference,
+            media_identity["uri"],
+            {**media_identity, "source": reference},
+        ),
+    )
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "assets/first-copy.png"},
+        reference_requirements={1: "required"},
+    )
+    changed = FakeModel()
+    _run(
+        tmp_path,
+        model=changed,
+        frames=[1],
+        max_wait=0,
+        reference_overrides={1: "assets/renamed-copy.png"},
+        reference_requirements={1: "required"},
+    )
+
+    assert changed.submitted == []
+
+
+def test_optional_local_reference_without_store_is_dropped_with_exact_audit_in_manifest(tmp_path, monkeypatch):
+    for scheme in ("HTTPS", "GS"):
+        for name in ("UPLOAD_URL_TEMPLATE", "URI_TEMPLATE", "UPLOAD_HEADERS_JSON"):
+            monkeypatch.delenv(f"PROOF_MEDIA_{scheme}_{name}", raising=False)
     _run(
         tmp_path,
         model=FakeModel(),

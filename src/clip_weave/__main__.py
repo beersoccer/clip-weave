@@ -329,6 +329,12 @@ def gen_video_cmd(
     negative_overrides = {s.index: s.negative for s in doc.specs}
     reference_overrides = {s.index: s.reference for s in doc.specs}
     reference_requirements = {s.index: s.reference_requirement for s in doc.specs}
+    reference_sources = {s.index: getattr(s, "reference_source", None) or s.reference for s in doc.specs}
+    reference_licenses = {
+        s.index: getattr(s, "reference_license", None)
+        for s in doc.specs
+        if getattr(s, "reference_license", None)
+    }
 
     frame_list = None
     if frames:
@@ -361,6 +367,8 @@ def gen_video_cmd(
             negative_overrides=negative_overrides,
             reference_overrides=reference_overrides,
             reference_requirements=reference_requirements,
+            reference_sources=reference_sources,
+            reference_licenses=reference_licenses,
         )
     except VideoGenError as exc:
         click.echo(str(exc), err=True)

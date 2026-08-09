@@ -74,7 +74,28 @@ uv run python -m clip_weave gen-video videos/ev-launch/STORYBOARD.md \
 
 现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头的可恢复 `manifest.json`。非 dry-run 的 `gen-video` 会在任何提交前，针对选中 batch 的每个镜头，以已选 adapter 声明的静态 capability 检查比例、分辨率、时长和 reference；必需（`required`）reference 不能使用时，整个 batch 被阻止，不会提交任何镜头。可选（`optional`）reference 会按 capability 接受或丢弃，并将 accepted/dropped 结果、原因、requested parameters 与 applied parameters 写入 manifest。每次提交前、远端任务完成待下载时、下载完成或出现本地等待/下载错误时，清单都会原子更新。相同请求再次执行时会复用已完成文件，或仅继续轮询、下载既有任务；对于提交结果不确定的 `submitting` 记录，不会自动重提，以避免重复消耗模型额度。
 
-该预检不上传或物化本地 reference，也不做远程 capability discovery。它不是 provider 端的 exactly-once 保证，且没有自动重试、artifact hash、媒体 QC 或完整的 G0-G4 质量系统；清单不会自动重新提交任务。关键帧候选、镜头质量契约和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
+支持的远程 reference URI（包括已有 T2I 产物 URI）会直接传给 provider；本地 reference 则会在提交前物化为 provider 支持的 proof media URI。它不是 provider 端的 exactly-once 保证，且没有自动重试、视频产物 artifact hash、媒体 QC 或完整的 G0-G4 质量系统；清单不会自动重新提交任务。关键帧候选、镜头质量契约和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
+
+### 本地 proof media
+
+为使用本地 reference，配置一个 provider 支持的对象存储 scheme。模板必须同时含有 `{sha256}` 和 `{suffix}`；以下只是变量形状示例，不含真实凭据：
+
+```bash
+# 适用于支持 https reference URI 的 provider
+PROOF_MEDIA_HTTPS_UPLOAD_URL_TEMPLATE=https://upload.example.invalid/proof/{sha256}{suffix}
+PROOF_MEDIA_HTTPS_URI_TEMPLATE=https://cdn.example.invalid/proof/{sha256}{suffix}
+# 可选，值必须是 string:string JSON；不要把真实 token 提交到仓库
+PROOF_MEDIA_HTTPS_UPLOAD_HEADERS_JSON='{"Authorization":"Bearer <upload-token>"}'
+
+# Vertex 使用 gs scheme；上传端点仍可为 https，但最终 URI 必须为 gs://
+PROOF_MEDIA_GS_UPLOAD_URL_TEMPLATE=https://storage-upload.example.invalid/proof/{sha256}{suffix}
+PROOF_MEDIA_GS_URI_TEMPLATE=gs://example-proof-media/proof/{sha256}{suffix}
+# PROOF_MEDIA_GS_UPLOAD_HEADERS_JSON='{"Authorization":"Bearer <upload-token>"}'
+```
+
+本地文件按内容 SHA-256、扩展名、scheme 和 URI 去重；首次上传后将记录原始路径、来源/许可证注记和 URI 到项目的 `renders/proof-media.json`。仅当本次新上传而该 ledger 写入失败时，系统会尝试删除刚上传的对象作补偿；复用已有记录或 ledger 已替换后失败时不会删除。未配置可用 store 时，`required` 本地 reference 会阻止整个 batch，`optional` 会继续生成并在 manifest 记为 `dropped`。
+
+这不是 T2I adapter：系统不生成、管理或验证 T2I 产物，也不验证许可证；已有且受 provider 支持的 T2I URI 只会原样传递。proof media 的 SHA-256 仅用于本地上传去重，视频下载产物仍没有 artifact hash。
 
 ## 验证
 
@@ -82,4 +103,4 @@ uv run python -m clip_weave gen-video videos/ev-launch/STORYBOARD.md \
 uv run pytest -q
 ```
 
-当前离线回归基线：`274 passed`。
+离线回归基线以当前 `uv run pytest -q` 输出为准。

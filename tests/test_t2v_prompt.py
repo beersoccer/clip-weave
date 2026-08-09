@@ -251,6 +251,34 @@ def test_reference_without_requirement_defaults_to_optional(tmp_path):
     assert doc.specs[0].reference_requirement == "optional"
 
 
+def test_reference_metadata_round_trips(tmp_path):
+    doc = parse_markdown_from_text(
+        tmp_path,
+        "## Frame 1 — Chassis\n"
+        "- reference: assets/chassis.png\n"
+        "- reference_source: Wikimedia Commons\n"
+        "- reference_license: CC BY 4.0\n",
+    )
+
+    spec = doc.specs[0]
+    assert spec.reference == "assets/chassis.png"
+    assert spec.reference_source == "Wikimedia Commons"
+    assert spec.reference_license == "CC BY 4.0"
+
+    rendered = render_markdown(doc)
+    assert "- reference_source: Wikimedia Commons" in rendered
+    assert "- reference_license: CC BY 4.0" in rendered
+
+    legacy = parse_markdown_from_text(
+        tmp_path,
+        "## Frame 1 — Chassis\n- reference: assets/chassis.png\n",
+    )
+    assert legacy.specs[0].reference_source is None
+    assert legacy.specs[0].reference_license is None
+    assert "reference_source" not in render_markdown(legacy)
+    assert "reference_license" not in render_markdown(legacy)
+
+
 def test_invalid_reference_requirement_defaults_to_optional(tmp_path):
     doc = parse_markdown_from_text(
         tmp_path,
