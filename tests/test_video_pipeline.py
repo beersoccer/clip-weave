@@ -254,6 +254,22 @@ def test_artifact_hash_revalidation_opens_the_same_nofollow_file_descriptor(tmp_
     assert flags_seen[0] & os.O_NOFOLLOW
 
 
+def test_artifact_hash_revalidation_fails_closed_without_nofollow(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+    opened = False
+
+    def unsafe_open(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("unsafe open must not run")
+
+    monkeypatch.delattr(video_pipeline.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(video_pipeline.os, "open", unsafe_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+    assert opened is False
+
+
 def test_artifact_hash_revalidation_rejects_symlink_open_error(tmp_path, monkeypatch):
     results = _run(tmp_path, model=FakeModel(), frames=[1])
 
