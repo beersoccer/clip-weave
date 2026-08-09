@@ -200,11 +200,14 @@ class ReviewDecision:
         _unit_interval(self.confidence, "confidence")
 
 
-def _unique_ids(records: tuple[object, ...], attribute: str, field: str) -> set[str]:
-    ids = [getattr(record, attribute) for record in records]
-    if len(ids) != len(set(ids)):
-        raise VideoGenError(f"{field} contains duplicate {attribute} values")
-    return set(ids)
+def _unique_ids(records: tuple[object, ...], attribute: str, field: str) -> tuple[str, ...]:
+    ids: list[str] = []
+    for record in records:
+        identifier = getattr(record, attribute)
+        if identifier in ids:
+            raise VideoGenError(f"{field} contains duplicate {attribute} values")
+        ids.append(identifier)
+    return tuple(ids)
 
 
 @dataclass(frozen=True)
@@ -235,7 +238,6 @@ class ProductionContract:
         audit_ids = _unique_ids(self.reference_audits, "audit_id", "reference_audits")
         shot_ids = _unique_ids(self.shot_cards, "shot_id", "shot_cards")
         _unique_ids(self.cue_sheet, "cue_id", "cue_sheet")
-        _unique_ids(self.review_decisions, "target_id", "review_decisions")
         for shot in self.shot_cards:
             for audit_id in shot.reference_audit_refs:
                 if audit_id not in audit_ids:

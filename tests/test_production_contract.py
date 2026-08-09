@@ -227,7 +227,6 @@ def test_review_decision_requires_positive_integer_revision(target_revision: obj
         ("reference_audits", (reference_audit(),) * 2),
         ("shot_cards", (shot_card(),) * 2),
         ("cue_sheet", (cue(),) * 2),
-        ("review_decisions", (review_decision(),) * 2),
     ],
 )
 def test_contract_rejects_duplicate_ids(field: str, replacement: tuple[object, ...]) -> None:
@@ -238,6 +237,28 @@ def test_contract_rejects_duplicate_ids(field: str, replacement: tuple[object, .
 def test_contract_rejects_cue_for_unknown_shot() -> None:
     with pytest.raises(VideoGenError, match=r"cue.*shot_id.*shot-missing"):
         valid_contract(cue_sheet=(cue(shot_id="shot-missing"),))
+
+
+def test_contract_allows_multiple_decisions_for_target_at_different_revisions() -> None:
+    contract = valid_contract(
+        review_decisions=(review_decision(), review_decision(target_revision=2, decision="revise")),
+    )
+
+    assert [decision.target_revision for decision in contract.review_decisions] == [1, 2]
+
+
+def test_contract_rejects_duplicate_unhashable_fact_id_without_type_error() -> None:
+    class UnhashableString(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    fact_id = UnhashableString("fact-1")
+    facts = (
+        FactSource(fact_id, "first claim", "brief", True),
+        FactSource(fact_id, "second claim", "brief", True),
+    )
+
+    with pytest.raises(VideoGenError, match="facts_sources"):
+        valid_contract(facts_sources=facts)
 
 
 @pytest.mark.parametrize(
