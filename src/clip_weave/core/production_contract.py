@@ -30,6 +30,8 @@ def _text_tuple(value: object, field: str) -> None:
 def _choice(value: object, field: str, choices: set[str], *, allow_none: bool = False) -> None:
     if value is None and allow_none:
         return
+    if not isinstance(value, str):
+        raise VideoGenError(f"{field} must be a string")
     if value not in choices:
         allowed = ", ".join(sorted(choices))
         raise VideoGenError(f"{field} must be one of: {allowed}")
@@ -43,6 +45,11 @@ def _positive(value: object, field: str) -> None:
 def _unit_interval(value: object, field: str) -> None:
     if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or not 0 <= value <= 1:
         raise VideoGenError(f"{field} must be between 0 and 1")
+
+
+def _positive_int(value: object, field: str) -> None:
+    if type(value) is not int or value <= 0:
+        raise VideoGenError(f"{field} must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -171,7 +178,7 @@ class Cue:
 class ReviewDecision:
     target_type: str
     target_id: str
-    target_revision: str
+    target_revision: int
     decision: str
     reasons: tuple[str, ...]
     score: float
@@ -180,8 +187,9 @@ class ReviewDecision:
     reviewed_at: str
 
     def __post_init__(self) -> None:
-        for field in ("target_type", "target_id", "target_revision", "reviewer", "reviewed_at"):
+        for field in ("target_type", "target_id", "reviewer", "reviewed_at"):
             _text(getattr(self, field), field)
+        _positive_int(self.target_revision, "target_revision")
         _choice(self.decision, "decision", {"accepted", "revise", "rejected"})
         _text_tuple(self.reasons, "reasons")
         _unit_interval(self.score, "score")

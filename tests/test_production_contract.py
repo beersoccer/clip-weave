@@ -84,7 +84,7 @@ def review_decision(**overrides: object) -> ReviewDecision:
     values: dict[str, object] = {
         "target_type": "shot",
         "target_id": "shot-1",
-        "target_revision": "rev-1",
+        "target_revision": 1,
         "decision": "accepted",
         "reasons": ("Matches the creative contract.",),
         "score": 0.9,
@@ -160,6 +160,26 @@ def test_unknown_enum_values_are_rejected(factory: object, overrides: dict[str, 
 @pytest.mark.parametrize(
     ("factory", "overrides", "field"),
     [
+        (creative_contract, {"production_profile": []}, "production_profile"),
+        (reference_audit, {"subject_type": []}, "subject_type"),
+        (reference_audit, {"requirement": []}, "requirement"),
+        (reference_audit, {"outcome": []}, "outcome"),
+        (cue, {"kind": []}, "kind"),
+        (review_decision, {"decision": []}, "decision"),
+    ],
+)
+def test_non_string_enum_values_raise_video_gen_error(
+    factory: object,
+    overrides: dict[str, object],
+    field: str,
+) -> None:
+    with pytest.raises(VideoGenError, match=field):
+        factory(**overrides)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("factory", "overrides", "field"),
+    [
         (creative_contract, {"audience": ""}, "audience"),
         (creative_contract, {"must_keep": ("",)}, "must_keep"),
         (FactSource, {"id": "fact-1", "claim": "claim", "source": "brief", "approved": 1}, "approved"),
@@ -181,6 +201,15 @@ def test_unknown_enum_values_are_rejected(factory: object, overrides: dict[str, 
 def test_core_value_constraints_are_rejected(factory: object, overrides: dict[str, object], field: str) -> None:
     with pytest.raises(VideoGenError, match=field):
         factory(**overrides)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    "target_revision",
+    [0, -1, True, 1.5, nan, inf, "1"],
+)
+def test_review_decision_requires_positive_integer_revision(target_revision: object) -> None:
+    with pytest.raises(VideoGenError, match="target_revision"):
+        review_decision(target_revision=target_revision)
 
 
 @pytest.mark.parametrize(
