@@ -66,7 +66,9 @@
 
 ## 4. 生产契约与可追溯状态
 
-所有契约版本化且不可覆盖；修改方向创建新版本。每个最终镜头都能追溯到 contract、事实来源、参考、候选、供应商任务和批准决定。
+当前实现是单项目账本 `renders/production-contract.json`：每次正式决策点追加一份完整、不可覆盖的快照，默认读取当前版本，并可按 revision 追溯历史。账本冻结 Creative Contract、Facts Source、Reference Audit、Shot Card、Cue Sheet 和 Review Decision 六类对象。Agent 草稿不落盘；当前不为每个对象单独建文件，也不提供事件回放。
+
+任务未来应钉扎 contract_revision；当前尚未接入 submit 或 manifest。因此，以下各对象的生产链接入、供应商任务追溯和完整质量流程仍是目标架构，不能视为当前已实现能力。
 
 ### 4.1 Creative Contract
 
