@@ -136,10 +136,12 @@ HyperFrames 继续拥有 HTML 动画、媒体 seek、lint/check 和渲染。clip
 
 自动评分只能做初筛、解释和排序；它不能替用户确认事实、权利或最终发布，也不能在无参考的首次创意中承诺“导演感”。
 
+G1 目前**未上线**。现有 T2V 下载路径只完成最小 artifact 完整性检查：下载后计算 SHA-256 并写入 manifest；恢复时仅复用哈希相同的非 symlink 普通文件。哈希不可信的记录只会回到下载、轮询或 `failed`，绝不因此重新 submit。它不验证文件大小或媒体容器，也尚未实现 `ffprobe`、候选评分、关键帧/视觉媒体 QC 或 G1 的证据包与失败处置。
+
 | Gate | 检查对象 | 必须保存的证据 | 失败动作 |
 | --- | --- | --- | --- |
 | G0 Preflight | capabilities、事实、授权、参考可提交性、预算 | applied/requested 参数、Reference Audit | 停止或请求业务/授权决定 |
-| G1 Asset/Candidate | T2I 关键帧、录屏、音频、下载完整性 | 候选缩略图、hash、评分、置信度 | 同一 contract 内产生局部变体 |
+| G1 Asset/Candidate（目标，未上线） | T2I 关键帧、录屏、音频、下载完整性 | 候选缩略图、hash、评分、置信度 | 同一 contract 内产生局部变体 |
 | G2 Shot | 单镜头身份、构图、动作、文字伪影、技术规格 | ffprobe、关键帧、rubric 结果 | 仅重做该镜头 |
 | G3 Seam | 相邻镜头的主体、方向、光线、景别、节奏、音画 cue | 边界前后帧、短片段、cue 偏差 | 调整相邻镜头或转场，不覆盖已锁定资产 |
 | G4 Film | hook、叙事、信息密度、字幕、安全区、品牌一致性、真实播放 | contact sheet、1x 实际 render、音频/字幕检查、结论 | 定向修复后重新运行相关 Gate |
