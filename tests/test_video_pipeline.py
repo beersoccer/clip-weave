@@ -4,8 +4,11 @@ generate_clips() accepts `model=`, so every test injects a FakeModel and no
 network, ffmpeg binary, or gateway is touched.
 """
 
+import hashlib
+import errno
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -182,6 +185,14 @@ def test_manifest_records_run_metadata(tmp_path):
     assert manifest["clips"][0]["state"] == "succeeded"
 
 
+def test_successful_download_records_artifact_hash_in_result_and_manifest(tmp_path):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    expected = hashlib.sha256(b"fake mp4 bytes").hexdigest()
+    assert results[0].artifact_sha256 == expected
+    assert _manifest(tmp_path)["clips"][0]["artifact_sha256"] == expected
+
+
 def test_manifest_is_written_before_a_later_submit_crashes(tmp_path):
     with pytest.raises(RuntimeError, match="simulated process stop"):
         _run(tmp_path, model=FakeModel(crash_on_submit_number=2))
@@ -224,6 +235,242 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
 
     assert [result.state for result in results] == ["succeeded"]
     assert resumed.submitted == []
+    assert resumed.downloaded == []
+
+
+def test_artifact_hash_revalidation_opens_the_same_nofollow_file_descriptor(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+    flags_seen = []
+    original_open = os.open
+
+    def capture_open(path, flags, *args, **kwargs):
+        flags_seen.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(video_pipeline.os, "open", capture_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is True
+    assert flags_seen
+    assert flags_seen[0] & os.O_NOFOLLOW
+
+
+def test_artifact_hash_revalidation_fails_closed_without_nofollow(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+    opened = False
+
+    def unsafe_open(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("unsafe open must not run")
+
+    monkeypatch.delattr(video_pipeline.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(video_pipeline.os, "open", unsafe_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+    assert opened is False
+
+
+def test_artifact_hash_revalidation_rejects_symlink_open_error(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    def reject_open(*_args, **_kwargs):
+        raise OSError(errno.ELOOP, "symlink detected")
+
+    monkeypatch.setattr(video_pipeline.os, "open", reject_open)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+
+
+def test_artifact_hash_revalidation_rejects_non_regular_descriptor(tmp_path, monkeypatch):
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    def fifo_stat(_fd):
+        return os.stat_result((stat.S_IFIFO,) + (0,) * 9)
+
+    monkeypatch.setattr(video_pipeline.os, "fstat", fifo_stat)
+
+    assert video_pipeline._artifact_hash_matches(results[0]) is False
+
+
+def test_completed_symlink_is_not_reused_even_when_artifact_hash_matches(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    video_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    target_path = video_path.with_name("original.mp4")
+    video_path.rename(target_path)
+    try:
+        video_path.symlink_to(target_path)
+    except (NotImplementedError, OSError) as exc:
+        target_path.rename(video_path)
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_completed_file_with_mismatched_artifact_hash_redownloads_without_submit(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_integrity_recovery_preserves_existing_artifact_at_standard_path(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    standard_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    standard_path.write_bytes(b"user content")
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    manifest_path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.downloaded
+    assert standard_path.read_bytes() == b"user content"
+    assert results[0].video_path != str(standard_path)
+    recovered_path = Path(results[0].video_path)
+    assert recovered_path.is_file()
+    assert results[0].artifact_sha256 == hashlib.sha256(recovered_path.read_bytes()).hexdigest()
+
+
+def test_recovery_download_does_not_replace_concurrent_destination(tmp_path, monkeypatch):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    standard_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    standard_path.write_bytes(b"user content")
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    manifest_path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    original_link = video_pipeline.os.link
+    concurrent_path = standard_path.with_name("01-开场.recovered-1.mp4")
+    calls = 0
+
+    def race_link(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            Path(destination).write_bytes(b"concurrent content")
+            raise FileExistsError
+        return original_link(source, destination)
+
+    monkeypatch.setattr(video_pipeline.os, "link", race_link)
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.downloaded
+    assert calls == 2
+    assert concurrent_path.read_bytes() == b"concurrent content"
+    assert results[0].video_path == str(
+        standard_path.with_name("01-开场.recovered-2.mp4")
+    )
+
+
+@pytest.mark.parametrize("artifact_sha256", [None, "not-a-sha", "A" * 64])
+def test_completed_file_with_invalid_artifact_hash_redownloads_without_submit(
+    tmp_path, artifact_sha256
+):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = artifact_sha256
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_completed_file_with_unreadable_artifact_redownloads_without_submit(tmp_path, monkeypatch):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    original_open = os.open
+    calls = 0
+
+    def fail_revalidation_open(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("read failed")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(video_pipeline.os, "open", fail_revalidation_open)
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_invalid_completed_artifact_with_only_task_id_returns_to_polling(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].update(
+        state="succeeded",
+        video_path="missing.mp4",
+        artifact_sha256="0" * 64,
+        video_url=None,
+        inline_payload_path=None,
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel(polls={"task-1": TaskStatus(state="failed", raw={}, error="cancelled")})
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["failed"]
+    assert resumed.submitted == []
+    assert resumed.polled == ["task-1"]
+    assert resumed.downloaded == []
+
+
+def test_invalid_completed_artifact_without_recovery_source_fails_without_submit(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].update(
+        video_path="missing.mp4",
+        artifact_sha256="0" * 64,
+        video_url=None,
+        inline_payload_path=None,
+        task_id=None,
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["failed"]
+    assert "artifact integrity check failed" in results[0].error
+    assert resumed.submitted == []
+    assert resumed.polled == []
     assert resumed.downloaded == []
 
 
@@ -681,6 +928,21 @@ def test_download_failure_stays_download_pending_and_resumes_without_submit(tmp_
     assert [result.state for result in results] == ["succeeded"]
     assert resumed.submitted == []
     assert resumed.downloaded
+
+
+def test_hash_failure_stays_download_pending_without_artifact_hash(tmp_path, monkeypatch):
+    def fail_hash(_path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(video_pipeline, "_sha256_file", fail_hash, raising=False)
+
+    results = _run(tmp_path, model=FakeModel(), frames=[1])
+
+    assert results[0].state == "download_pending"
+    assert results[0].artifact_sha256 is None
+    record = _manifest(tmp_path)["clips"][0]
+    assert record["state"] == "download_pending"
+    assert record["artifact_sha256"] is None
 
 
 def test_inline_video_result_resumes_download_without_polling(tmp_path):

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -83,6 +84,7 @@ class ClipResult:
     task_id: str | None = None
     state: str = "pending"
     video_path: str | None = None
+    artifact_sha256: str | None = None
     video_url: str | None = None
     inline_payload_path: str | None = None
     error: str | None = None
@@ -122,6 +124,65 @@ def _proof_media_identity(snapshot: dict[str, object]) -> dict[str, object]:
 def _fingerprint_reference_audit(audit: dict[str, object]) -> dict[str, object]:
     """Exclude the local provenance path from durable provider task identity."""
     return {key: value for key, value in audit.items() if key != "requested"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_hash_matches(result: ClipResult) -> bool:
+    artifact_sha256 = result.artifact_sha256
+    if not (
+        isinstance(artifact_sha256, str)
+        and len(artifact_sha256) == 64
+        and all(char in "0123456789abcdef" for char in artifact_sha256)
+        and result.video_path
+    ):
+        return False
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        return False
+
+    fd: int | None = None
+    try:
+        fd = os.open(result.video_path, os.O_RDONLY | nofollow)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            fd = None
+            return False
+
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == artifact_sha256
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return False
+
+
+def _download_destination(out: Path, index: int, slug: str) -> Path:
+    """Choose a destination without replacing an existing artifact."""
+    standard = out / f"{index:02d}-{slug}.mp4"
+    if not os.path.lexists(standard):
+        return standard
+
+    for number in range(1, 1_000_000):
+        recovered = standard.with_name(
+            f"{standard.stem}.recovered-{number}{standard.suffix}"
+        )
+        if not os.path.lexists(recovered):
+            return recovered
+    raise VideoGenError(f"no available recovery destination for frame {index} in {out}")
 
 
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
@@ -208,6 +269,7 @@ def _clip_from_record(record: dict[str, Any], manifest_path: Path) -> ClipResult
             task_id=record.get("task_id"),
             state=str(record.get("state") or "pending"),
             video_path=record.get("video_path"),
+            artifact_sha256=record.get("artifact_sha256"),
             video_url=record.get("video_url"),
             inline_payload_path=record.get("inline_payload_path"),
             error=record.get("error"),
@@ -257,18 +319,36 @@ def _download_clip(
     manifest: dict[str, Any],
     report: Reporter,
 ) -> None:
-    dest = out / f"{result.index:02d}-{_slug_for(storyboard, result.index)}.mp4"
-    temp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        vm.download(status, temp)
-        os.replace(temp, dest)
-    except Exception as exc:  # noqa: BLE001 - download/IO surface
-        temp.unlink(missing_ok=True)
-        result.state = "download_pending"
-        result.error = f"download failed: {exc}"
-        _persist_clip(manifest_path, manifest, result)
-        logger.error("frame %s download failed: %s", result.index, exc)
-        return
+    slug = _slug_for(storyboard, result.index)
+    while True:
+        dest = _download_destination(out, result.index, slug)
+        temp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=dest.parent,
+                prefix=f".{dest.name}-",
+                suffix=".part",
+                delete=False,
+            ) as handle:
+                temp = Path(handle.name)
+            vm.download(status, temp)
+            try:
+                os.link(temp, dest)
+            except FileExistsError:
+                temp.unlink(missing_ok=True)
+                continue
+            temp.unlink()
+            result.artifact_sha256 = _sha256_file(dest)
+        except Exception as exc:  # noqa: BLE001 - download/IO surface
+            if temp:
+                temp.unlink(missing_ok=True)
+            result.state = "download_pending"
+            result.artifact_sha256 = None
+            result.error = f"download failed: {exc}"
+            _persist_clip(manifest_path, manifest, result)
+            logger.error("frame %s download failed: %s", result.index, exc)
+            return
+        break
     result.state = "succeeded"
     result.video_path = str(dest)
     result.error = None
@@ -475,16 +555,19 @@ def generate_clips(
         )
         existing = _find_clip(manifest, manifest_path, frame.index, result.request_fingerprint)
         if existing:
-            if existing.state == "succeeded" and existing.video_path and Path(existing.video_path).exists():
-                results.append(existing)
-                continue
             if existing.state == "succeeded":
+                if _artifact_hash_matches(existing):
+                    results.append(existing)
+                    continue
                 existing.video_path = None
-                existing.state = (
-                    "download_pending"
-                    if existing.video_url or existing.inline_payload_path
-                    else "running"
-                )
+                existing.artifact_sha256 = None
+                existing.error = "artifact integrity check failed"
+                if existing.video_url or existing.inline_payload_path:
+                    existing.state = "download_pending"
+                elif existing.task_id:
+                    existing.state = "running"
+                else:
+                    existing.state = "failed"
                 _persist_clip(manifest_path, manifest, existing)
             results.append(existing)
             continue

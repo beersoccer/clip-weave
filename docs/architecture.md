@@ -74,7 +74,9 @@ manifest 是版本化的耐久状态记录。它为每个选中镜头保存规�
 
 当前实现将每镜头 task id、状态、下载来源（URL 或内联内容的短生命周期 sidecar）、路径、错误、请求指纹，以及 requested/applied parameters 和 reference audit 写入 `manifest.json`，并在状态变化时原子持久化。本地 reference 的独立去重 ledger 为 `renders/proof-media.json`；支持的远程 URI 不会被上传或改写，也不做远程 capability discovery。恢复以相同请求指纹为边界，目标是避免本地重复提交；它不提供 provider 端 exactly-once，也没有自动重试，不会自动重新提交 `submitting` 或 `failed` 记录。
 
-当前实现不提供视频下载产物 artifact hash 或媒体 QC；本地 proof media 的 SHA-256 只用于上传去重。文件类型、大小、哈希、`ffprobe` 时长/分辨率/fps/音轨探测仍是后续交付检查。上述纯本地 G0 预检不能替代完整的 G0-G4 质量系统，也不等同于提升审美质量。
+当前实现会在下载落盘后计算视频 artifact 的 SHA-256，并将其写入 `ClipResult` 和 manifest。恢复 `succeeded` 记录时，只有平台提供 `O_NOFOLLOW`、`video_path` 能以该标志安全打开、同一文件描述符的 `fstat` 判定为普通文件，且从该文件描述符重新计算出的 SHA-256 与 manifest 中格式合法的哈希完全一致，才会复用该本地文件；没有 `O_NOFOLLOW` 时会 fail closed，不复用。哈希缺失、格式非法、文件缺失/非普通文件、读取失败或不匹配时，记录不再被信任：有已保存下载来源时只回到下载；只有 task id 时只回到轮询；两者都没有时标记为 `failed`；这些恢复路径绝不重新 submit。
+
+这只是下载字节完整性检查，不是媒体 QC。当前不检查文件大小、容器/编码类型，也不运行 `ffprobe` 验证时长、分辨率、fps 或音轨；候选评分、关键帧/视觉质量判断和 G1--G4 媒体质量 Gate 仍未实现。本地 proof media 的 SHA-256 仍只用于上传去重。上述纯本地 G0 预检不能替代完整的 G0-G4 质量系统，也不等同于提升审美质量。
 
 生产契约账本目前不记录 artifact hash、不实现自动重试或 provider 端 exactly-once；现有 manifest 尚无 contract_revision，且生产契约当前未接入 submit 或 manifest。
 
