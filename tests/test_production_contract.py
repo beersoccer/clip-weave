@@ -177,6 +177,14 @@ def test_non_string_enum_values_raise_video_gen_error(
         factory(**overrides)  # type: ignore[operator]
 
 
+def test_unhashable_string_enum_value_raises_video_gen_error() -> None:
+    class UnhashableString(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    with pytest.raises(VideoGenError, match="production_profile"):
+        creative_contract(production_profile=UnhashableString("html_launch"))
+
+
 @pytest.mark.parametrize(
     ("factory", "overrides", "field"),
     [

@@ -32,7 +32,11 @@ def _choice(value: object, field: str, choices: set[str], *, allow_none: bool = 
         return
     if not isinstance(value, str):
         raise VideoGenError(f"{field} must be a string")
-    if value not in choices:
+    try:
+        is_allowed = value in choices
+    except TypeError as exc:
+        raise VideoGenError(f"{field} must be a hashable string") from exc
+    if not is_allowed:
         allowed = ", ".join(sorted(choices))
         raise VideoGenError(f"{field} must be one of: {allowed}")
 
