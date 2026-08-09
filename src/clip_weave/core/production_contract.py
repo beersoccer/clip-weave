@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from math import isfinite
+import os
 from pathlib import Path
+import tempfile
 
 from clip_weave.adapters.video_gen import VideoGenError
 
@@ -438,12 +440,40 @@ def _read_ledger(path: Path) -> list[ContractRevision]:
         raise VideoGenError(f"{path}: invalid production contract ledger: {exc}") from exc
 
 
-def _write_ledger(path: Path, payload: dict[str, object]) -> None:
+def _write_ledger_atomically(path: Path, payload: dict[str, object]) -> None:
+    temporary_path: str | None = None
+    replacement_completed = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+            prefix=".production-contract-",
+            suffix=".tmp",
+        ) as temporary_file:
+            temporary_path = temporary_file.name
+            json.dump(payload, temporary_file, ensure_ascii=False, indent=2)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        replacement_completed = True
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except OSError as exc:
+        if replacement_completed:
+            raise VideoGenError(
+                f"{path}: replacement completed, but unable to sync production contract ledger directory: {exc}"
+            ) from exc
         raise VideoGenError(f"{path}: unable to write production contract ledger: {exc}") from exc
+    finally:
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 def load_current_contract(project_dir: Path) -> ProductionContract | None:
@@ -472,5 +502,5 @@ def append_contract_revision(project_dir: Path, contract: ProductionContract, *,
     records = _read_ledger(path) if path.exists() else []
     record = ContractRevision(len(records) + 1, datetime.now(timezone.utc).isoformat(), reason, contract)
     all_records = [*records, record]
-    _write_ledger(path, {"schema_version": _LEDGER_SCHEMA_VERSION, "current_revision": record.revision, "revisions": [_revision_to_dict(item) for item in all_records]})
+    _write_ledger_atomically(path, {"schema_version": _LEDGER_SCHEMA_VERSION, "current_revision": record.revision, "revisions": [_revision_to_dict(item) for item in all_records]})
     return record

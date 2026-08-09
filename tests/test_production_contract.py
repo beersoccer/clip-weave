@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 from fractions import Fraction
 import json
 from math import inf, nan
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -450,15 +451,27 @@ def test_append_rejects_damaged_ledger_without_overwriting_its_bytes(tmp_path: P
     assert path.read_bytes() == original
 
 
-def test_append_wraps_write_error_without_changing_existing_ledger(tmp_path: Path) -> None:
+def test_append_replace_failure_preserves_existing_ledger_and_cleans_temporary_file(tmp_path: Path) -> None:
     first = valid_contract()
     append_contract_revision(tmp_path, first, reason="Initial approval")
     path = ledger_path(tmp_path)
     original = path.read_bytes()
 
-    with patch.object(Path, "write_text", side_effect=OSError("disk full")):
-        with pytest.raises(VideoGenError, match=r"production-contract\.json.*disk full") as error:
+    with patch.object(os, "replace", side_effect=OSError("replace failed")):
+        with pytest.raises(VideoGenError, match=r"production-contract\.json.*replace failed") as error:
             append_contract_revision(tmp_path, valid_contract(), reason="Second approval")
 
     assert isinstance(error.value.__cause__, OSError)
     assert path.read_bytes() == original
+    assert list(path.parent.glob(".production-contract-*.tmp")) == []
+
+
+def test_append_reports_directory_sync_failure_after_replacement(tmp_path: Path) -> None:
+    append_contract_revision(tmp_path, valid_contract(), reason="Initial approval")
+
+    with patch.object(os, "fsync", side_effect=(None, OSError("directory sync failed"))):
+        with pytest.raises(VideoGenError, match=r"production-contract\.json.*replacement completed.*directory sync failed") as error:
+            append_contract_revision(tmp_path, valid_contract(), reason="Second approval")
+
+    assert isinstance(error.value.__cause__, OSError)
+    assert load_contract_revision(tmp_path, 2) == valid_contract()
