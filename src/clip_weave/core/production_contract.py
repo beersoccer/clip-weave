@@ -443,6 +443,8 @@ def _read_ledger(path: Path) -> list[ContractRevision]:
 def _write_ledger_atomically(path: Path, payload: dict[str, object]) -> None:
     temporary_path: str | None = None
     replacement_completed = False
+    write_error: OSError | None = None
+    cleanup_error: OSError | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -466,14 +468,23 @@ def _write_ledger_atomically(path: Path, payload: dict[str, object]) -> None:
         finally:
             os.close(directory_fd)
     except OSError as exc:
-        if replacement_completed:
-            raise VideoGenError(
-                f"{path}: replacement completed, but unable to sync production contract ledger directory: {exc}"
-            ) from exc
-        raise VideoGenError(f"{path}: unable to write production contract ledger: {exc}") from exc
+        write_error = exc
     finally:
-        if temporary_path is not None and os.path.exists(temporary_path):
-            os.unlink(temporary_path)
+        try:
+            if temporary_path is not None and os.path.exists(temporary_path):
+                Path(temporary_path).unlink()
+        except OSError as exc:
+            cleanup_error = exc
+    if write_error is not None:
+        if replacement_completed:
+            message = f"{path}: replacement completed, but unable to sync production contract ledger directory: {write_error}"
+        else:
+            message = f"{path}: unable to write production contract ledger: {write_error}"
+        if cleanup_error is not None:
+            message += f"; temporary ledger cleanup failed: {cleanup_error}"
+        raise VideoGenError(message) from write_error
+    if cleanup_error is not None:
+        raise VideoGenError(f"{path}: unable to clean up temporary production contract ledger: {cleanup_error}") from cleanup_error
 
 
 def load_current_contract(project_dir: Path) -> ProductionContract | None:
