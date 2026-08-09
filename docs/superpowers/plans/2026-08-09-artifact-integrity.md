@@ -42,7 +42,7 @@ def test_downloaded_clip_records_artifact_sha256(tmp_path):
 - [ ] 写失败测试：首次运行后把 manifest 的 `artifact_sha256` 改为 `"0" * 64`；第二次运行必须无 `submit` 且发生 `download`，而不是直接复用。
 - [ ] 运行该测试，预期旧逻辑失败于 `resumed.downloaded == []`。
 - [ ] 新增 `_artifact_hash_matches(result)`：hash 必须全匹配 `[0-9a-f]{64}`、`video_path` 是常规文件、重新计算结果相同；文件读取 `OSError` 返回 `False`。
-- [ ] 用 helper 替换 `existing.state == "succeeded"` 的仅存在性复用判断。失败时清空 `video_path`/`artifact_sha256`，记录 `artifact integrity check failed` 并持久化；有 `video_url` 或 inline payload 则 `download_pending`，否则有 `task_id` 则 `running`，无来源则 `failed`。每种情况 append 既有记录且绝不进入 submit 分支。
+- [ ] 用 helper 替换 `existing.state == "succeeded"` 的仅存在性复用判断。失败时清空 `video_path`/`artifact_sha256`，记录 `artifact integrity check failed` 并持久化；有 `video_url` 或 inline payload 则 `download_pending`，否则有 `task_id` 则 `running`，无来源则 `failed`。每种情况持久化或更新既有记录且绝不进入 submit 分支。
 - [ ] 运行 hash mismatch 测试，预期 PASS。
 - [ ] 添加参数化测试 `None`、`"not-a-sha"`、`"A" * 64`；均须只下载、不 submit。添加读取 `OSError`、仅 task id（只 poll）、无来源（failed 且含 integrity error）测试。
 - [ ] 运行 `UV_CACHE_DIR=/private/tmp/clip-weave-uv-cache uv run --extra dev pytest tests/test_video_pipeline.py -q`，预期 PASS；提交 `git add src/clip_weave/core/video_pipeline.py tests/test_video_pipeline.py`，随后 `git commit -m "fix: verify artifact hashes before reuse"`。
