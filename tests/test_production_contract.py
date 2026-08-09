@@ -195,6 +195,36 @@ def test_unhashable_string_enum_value_raises_video_gen_error() -> None:
 
 
 @pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        ("accepted", None),
+        ("dropped", "Provider declined the reference."),
+        ("blocked", "Reference material is unavailable."),
+    ],
+)
+def test_reference_audit_rejects_missing_requirement_when_requested(
+    outcome: str,
+    reason: str | None,
+) -> None:
+    with pytest.raises(VideoGenError, match="requirement"):
+        reference_audit(requirement=None, outcome=outcome, reason=reason)
+
+
+def test_reference_audit_allows_not_requested_without_requirement() -> None:
+    audit = reference_audit(
+        requirement=None,
+        requested=None,
+        submitted=None,
+        applied=None,
+        outcome="not_requested",
+        reason=None,
+        proof_media_ref=None,
+    )
+
+    assert audit.requirement is None
+
+
+@pytest.mark.parametrize(
     ("factory", "overrides", "field"),
     [
         (creative_contract, {"audience": ""}, "audience"),

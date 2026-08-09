@@ -116,11 +116,15 @@ class ReferenceAudit:
             "subject_type",
             {"product", "person", "scene", "style", "first_frame", "last_frame", "proof_media"},
         )
-        _choice(self.requirement, "requirement", {"optional", "required"}, allow_none=True)
         _text(self.requested, "requested", allow_none=True)
         _text(self.submitted, "submitted", allow_none=True)
         _text(self.applied, "applied", allow_none=True)
         _choice(self.outcome, "outcome", {"not_requested", "accepted", "dropped", "blocked"})
+        if self.requirement is None:
+            if self.outcome != "not_requested":
+                raise VideoGenError("requirement is required unless outcome is not_requested")
+        else:
+            _choice(self.requirement, "requirement", {"optional", "required"})
         _text(self.reason, "reason", allow_none=True)
         _text(self.proof_media_ref, "proof_media_ref", allow_none=True)
         if self.outcome == "accepted":
