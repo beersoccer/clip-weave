@@ -1,6 +1,8 @@
 # 轻量版本化生产契约设计
 
-**状态：** 已批准，待实现。
+**状态：** 已实现（账本基础）。
+
+本轮已交付完整 schema、读取/追加 API 与原子项目级账本。`submit` 接入、在 `manifest.json` 写入 `contract_revision`，以及将契约接入实际生产链仍是后续任务。
 
 ## 目标
 
@@ -148,7 +150,7 @@ def append_contract_revision(
 - 账本 JSON 损坏、schema 不支持、revision 不连续、当前指针不一致、引用悬空或必填字段无效时失败并保留文件。
 - 同一 revision 永远不可修改或删除。新增版本必须包含完整有效快照和非空 `reason`。
 - 失败的 Agent 草稿不写入账本。没有正式生产决策，就没有新 revision。
-- `renders/proof-media.json` 仍只记录本地对象物化与 provenance；`renders/ai-clips/<provider>/manifest.json` 仍只记录 provider 任务状态。生产契约通过 revision 引用关联它们，但不合并三者职责。
+- `renders/proof-media.json` 仍只记录本地对象物化与 provenance；`renders/ai-clips/<provider>/manifest.json` 仍只记录 provider 任务状态。生产契约尚未通过 revision 与它们关联；后续接入时也不得合并三者职责。
 
 ## 验收与测试
 
