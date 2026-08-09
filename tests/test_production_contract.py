@@ -2,19 +2,27 @@ from __future__ import annotations
 
 from dataclasses import fields
 from dataclasses import FrozenInstanceError
+from fractions import Fraction
+import json
 from math import inf, nan
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from clip_weave.adapters.video_gen import VideoGenError
 from clip_weave.core.production_contract import (
     CreativeContract,
+    ContractRevision,
     Cue,
     FactSource,
     ProductionContract,
     ReferenceAudit,
     ReviewDecision,
     ShotCard,
+    append_contract_revision,
+    load_contract_revision,
+    load_current_contract,
 )
 
 
@@ -279,3 +287,178 @@ def test_contract_rejects_duplicate_unhashable_fact_id_without_type_error() -> N
 def test_contract_rejects_wrong_child_object_type(field: str, replacement: object) -> None:
     with pytest.raises(VideoGenError, match=field):
         valid_contract(**{field: replacement})
+
+
+def ledger_path(project_dir: Path) -> Path:
+    return project_dir / "renders" / "production-contract.json"
+
+
+def write_ledger(project_dir: Path, payload: object) -> None:
+    path = ledger_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_append_first_contract_revision_creates_versioned_ledger(tmp_path: Path) -> None:
+    contract = valid_contract()
+
+    record = append_contract_revision(tmp_path, contract, reason="Initial creative approval")
+
+    assert record == ContractRevision(1, record.created_at, "Initial creative approval", contract)
+    payload = json.loads(ledger_path(tmp_path).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert payload["current_revision"] == 1
+    assert payload["revisions"] == [{
+        "revision": 1,
+        "created_at": record.created_at,
+        "reason": "Initial creative approval",
+        "contract": {
+            "creative_contract": {
+                "production_profile": "html_launch",
+                "audience": "product leaders",
+                "platform": "web",
+                "target_duration_seconds": 30,
+                "narrative_promise": "Show the product value clearly.",
+                "must_keep": ["brand blue"],
+                "must_not": ["unsupported claims"],
+            },
+            "facts_sources": [{"id": "fact-1", "claim": "The product supports shared review.", "source": "approved product brief", "approved": True}],
+            "reference_audits": [{"audit_id": "audit-1", "shot_id": "shot-1", "subject_type": "product", "requirement": "required", "requested": "product.png", "submitted": "gs://proof/product.png", "applied": "gs://proof/product.png", "outcome": "accepted", "reason": None, "proof_media_ref": "proof-1"}],
+            "shot_cards": [{"shot_id": "shot-1", "purpose": "Introduce the product.", "subject": "The product interface", "action": "opens to the dashboard", "scene": "dark studio", "camera": "slow dolly in", "lighting": "soft blue rim light", "duration_seconds": 5, "must_keep": ["logo"], "must_not": ["text glitches"], "reference_audit_refs": ["audit-1"]}],
+            "cue_sheet": [{"cue_id": "cue-1", "start_seconds": 0, "end_seconds": 3, "kind": "vo", "content": "A clearer way to launch.", "shot_id": "shot-1"}],
+            "review_decisions": [{"target_type": "shot", "target_id": "shot-1", "target_revision": 1, "decision": "accepted", "reasons": ["Matches the creative contract."], "score": 0.9, "confidence": 0.8, "reviewer": "director", "reviewed_at": "2026-08-09T10:00:00+08:00"}],
+        },
+    }]
+
+
+def test_append_second_contract_revision_preserves_first_snapshot_and_loads_current(tmp_path: Path) -> None:
+    first = valid_contract()
+    second = valid_contract(creative_contract=creative_contract(audience="creative directors"))
+    append_contract_revision(tmp_path, first, reason="Initial approval")
+
+    record = append_contract_revision(tmp_path, second, reason="Audience refinement")
+
+    assert record.revision == 2
+    assert load_contract_revision(tmp_path, 1) == first
+    assert load_contract_revision(tmp_path, 2) == second
+    assert load_current_contract(tmp_path) == second
+
+
+def test_load_current_contract_returns_none_when_ledger_does_not_exist(tmp_path: Path) -> None:
+    assert load_current_contract(tmp_path) is None
+
+
+def test_load_contract_revision_rejects_missing_revision(tmp_path: Path) -> None:
+    append_contract_revision(tmp_path, valid_contract(), reason="Initial approval")
+
+    with pytest.raises(VideoGenError, match=r"production-contract\.json.*revision 2"):
+        load_contract_revision(tmp_path, 2)
+
+
+@pytest.mark.parametrize("revision", [True, 1.0, 0, -1])
+def test_load_contract_revision_requires_positive_builtin_integer(tmp_path: Path, revision: object) -> None:
+    append_contract_revision(tmp_path, valid_contract(), reason="Initial approval")
+
+    with pytest.raises(VideoGenError, match="revision"):
+        load_contract_revision(tmp_path, revision)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda payload: payload["revisions"][0].update(revision=2), "continuous"),
+        (lambda payload: payload.update(current_revision=2), "current_revision"),
+    ],
+)
+def test_load_rejects_noncontinuous_revision_or_wrong_current_pointer(
+    tmp_path: Path,
+    mutation: object,
+    message: str,
+) -> None:
+    append_contract_revision(tmp_path, valid_contract(), reason="Initial approval")
+    path = ledger_path(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutation(payload)  # type: ignore[operator]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(VideoGenError, match=rf"production-contract\.json.*{message}"):
+        load_current_contract(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema_version": 2, "current_revision": 1, "revisions": []},
+        {"schema_version": True, "current_revision": 1, "revisions": []},
+        {"schema_version": 1, "current_revision": 2, "revisions": []},
+        {"schema_version": 1, "current_revision": 1, "revisions": [{"revision": 2}]},
+        {"schema_version": 1, "current_revision": 1, "revisions": [], "unknown": True},
+    ],
+)
+def test_load_rejects_invalid_ledger_shape(tmp_path: Path, payload: object) -> None:
+    write_ledger(tmp_path, payload)
+
+    with pytest.raises(VideoGenError, match=r"production-contract\.json"):
+        load_current_contract(tmp_path)
+
+
+def test_load_rejects_malformed_json_without_overwriting_ledger(tmp_path: Path) -> None:
+    path = ledger_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(VideoGenError, match=r"production-contract\.json"):
+        load_current_contract(tmp_path)
+
+    assert path.read_text(encoding="utf-8") == "{invalid"
+
+
+def test_append_rejects_blank_reason_without_creating_ledger(tmp_path: Path) -> None:
+    with pytest.raises(VideoGenError, match="reason"):
+        append_contract_revision(tmp_path, valid_contract(), reason="  ")
+
+    assert not ledger_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("factory", "overrides", "field"),
+    [
+        (shot_card, {"duration_seconds": Fraction(1, 2)}, "duration_seconds"),
+        (cue, {"start_seconds": Fraction(1, 2)}, "start_seconds"),
+        (review_decision, {"score": Fraction(1, 2)}, "score"),
+        (review_decision, {"confidence": Fraction(1, 2)}, "confidence"),
+    ],
+)
+def test_contract_rejects_non_json_fraction_numbers(
+    factory: object,
+    overrides: dict[str, object],
+    field: str,
+) -> None:
+    with pytest.raises(VideoGenError, match=field):
+        factory(**overrides)  # type: ignore[operator]
+
+
+def test_append_rejects_damaged_ledger_without_overwriting_its_bytes(tmp_path: Path) -> None:
+    path = ledger_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = b'{"schema_version": 2}'
+    path.write_bytes(original)
+
+    with pytest.raises(VideoGenError, match=r"production-contract\.json"):
+        append_contract_revision(tmp_path, valid_contract(), reason="Initial approval")
+
+    assert path.read_bytes() == original
+
+
+def test_append_wraps_write_error_without_changing_existing_ledger(tmp_path: Path) -> None:
+    first = valid_contract()
+    append_contract_revision(tmp_path, first, reason="Initial approval")
+    path = ledger_path(tmp_path)
+    original = path.read_bytes()
+
+    with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+        with pytest.raises(VideoGenError, match=r"production-contract\.json.*disk full") as error:
+            append_contract_revision(tmp_path, valid_contract(), reason="Second approval")
+
+    assert isinstance(error.value.__cause__, OSError)
+    assert path.read_bytes() == original

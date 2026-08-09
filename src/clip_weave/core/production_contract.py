@@ -1,14 +1,12 @@
-"""Frozen, validated production-contract records.
-
-This module intentionally contains only in-memory schema validation. Persistence,
-revision ledgers, and pipeline integration belong to later layers.
-"""
+"""Frozen, validated production-contract records and their v1 revision ledger."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
 from math import isfinite
-from numbers import Real
+from pathlib import Path
 
 from clip_weave.adapters.video_gen import VideoGenError
 
@@ -41,13 +39,17 @@ def _choice(value: object, field: str, choices: set[str], *, allow_none: bool = 
         raise VideoGenError(f"{field} must be one of: {allowed}")
 
 
+def _json_number(value: object) -> bool:
+    return type(value) in {int, float} and isfinite(value)
+
+
 def _positive(value: object, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or value <= 0:
+    if not _json_number(value) or value <= 0:
         raise VideoGenError(f"{field} must be greater than 0")
 
 
 def _unit_interval(value: object, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or not 0 <= value <= 1:
+    if not _json_number(value) or not 0 <= value <= 1:
         raise VideoGenError(f"{field} must be between 0 and 1")
 
 
@@ -163,12 +165,8 @@ class Cue:
     def __post_init__(self) -> None:
         _text(self.cue_id, "cue_id")
         if (
-            isinstance(self.start_seconds, bool)
-            or isinstance(self.end_seconds, bool)
-            or not isinstance(self.start_seconds, Real)
-            or not isinstance(self.end_seconds, Real)
-            or not isfinite(self.start_seconds)
-            or not isfinite(self.end_seconds)
+            not _json_number(self.start_seconds)
+            or not _json_number(self.end_seconds)
             or self.start_seconds < 0
             or self.start_seconds > self.end_seconds
         ):
@@ -245,3 +243,234 @@ class ProductionContract:
         for item in self.cue_sheet:
             if item.shot_id not in shot_ids:
                 raise VideoGenError(f"cue shot_id references unknown shot {item.shot_id}")
+
+
+@dataclass(frozen=True)
+class ContractRevision:
+    revision: int
+    created_at: str
+    reason: str
+    contract: ProductionContract
+
+    def __post_init__(self) -> None:
+        _positive_int(self.revision, "revision")
+        _text(self.created_at, "created_at")
+        _text(self.reason, "reason")
+        if type(self.contract) is not ProductionContract:
+            raise VideoGenError("contract must be a ProductionContract")
+
+
+_LEDGER_SCHEMA_VERSION = 1
+_LEDGER_FILE_NAME = "production-contract.json"
+
+
+def _ledger_path(project_dir: Path) -> Path:
+    return project_dir / "renders" / _LEDGER_FILE_NAME
+
+
+def _mapping(value: object, context: str, keys: set[str]) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise VideoGenError(f"{context} has invalid fields")
+    return value
+
+
+def _list(value: object, context: str) -> list[object]:
+    if not isinstance(value, list):
+        raise VideoGenError(f"{context} must be a list")
+    return value
+
+
+def _tuple_of_text(value: object, context: str) -> tuple[str, ...]:
+    values = _list(value, context)
+    if any(not isinstance(item, str) for item in values):
+        raise VideoGenError(f"{context} must contain strings")
+    return tuple(values)
+
+
+def _record_to_dict(record: object) -> dict[str, object]:
+    if type(record) is CreativeContract:
+        item = record
+        return {
+            "production_profile": item.production_profile,
+            "audience": item.audience,
+            "platform": item.platform,
+            "target_duration_seconds": item.target_duration_seconds,
+            "narrative_promise": item.narrative_promise,
+            "must_keep": list(item.must_keep),
+            "must_not": list(item.must_not),
+        }
+    if type(record) is FactSource:
+        item = record
+        return {"id": item.id, "claim": item.claim, "source": item.source, "approved": item.approved}
+    if type(record) is ReferenceAudit:
+        item = record
+        return {
+            "audit_id": item.audit_id,
+            "shot_id": item.shot_id,
+            "subject_type": item.subject_type,
+            "requirement": item.requirement,
+            "requested": item.requested,
+            "submitted": item.submitted,
+            "applied": item.applied,
+            "outcome": item.outcome,
+            "reason": item.reason,
+            "proof_media_ref": item.proof_media_ref,
+        }
+    if type(record) is ShotCard:
+        item = record
+        return {
+            "shot_id": item.shot_id,
+            "purpose": item.purpose,
+            "subject": item.subject,
+            "action": item.action,
+            "scene": item.scene,
+            "camera": item.camera,
+            "lighting": item.lighting,
+            "duration_seconds": item.duration_seconds,
+            "must_keep": list(item.must_keep),
+            "must_not": list(item.must_not),
+            "reference_audit_refs": list(item.reference_audit_refs),
+        }
+    if type(record) is Cue:
+        item = record
+        return {
+            "cue_id": item.cue_id,
+            "start_seconds": item.start_seconds,
+            "end_seconds": item.end_seconds,
+            "kind": item.kind,
+            "content": item.content,
+            "shot_id": item.shot_id,
+        }
+    if type(record) is ReviewDecision:
+        item = record
+        return {
+            "target_type": item.target_type,
+            "target_id": item.target_id,
+            "target_revision": item.target_revision,
+            "decision": item.decision,
+            "reasons": list(item.reasons),
+            "score": item.score,
+            "confidence": item.confidence,
+            "reviewer": item.reviewer,
+            "reviewed_at": item.reviewed_at,
+        }
+    raise VideoGenError("unsupported contract record")
+
+
+def _contract_to_dict(contract: ProductionContract) -> dict[str, object]:
+    return {
+        "creative_contract": _record_to_dict(contract.creative_contract),
+        "facts_sources": [_record_to_dict(item) for item in contract.facts_sources],
+        "reference_audits": [_record_to_dict(item) for item in contract.reference_audits],
+        "shot_cards": [_record_to_dict(item) for item in contract.shot_cards],
+        "cue_sheet": [_record_to_dict(item) for item in contract.cue_sheet],
+        "review_decisions": [_record_to_dict(item) for item in contract.review_decisions],
+    }
+
+
+def _contract_from_dict(value: object) -> ProductionContract:
+    data = _mapping(value, "contract", {"creative_contract", "facts_sources", "reference_audits", "shot_cards", "cue_sheet", "review_decisions"})
+    creative = _mapping(data["creative_contract"], "creative_contract", {"production_profile", "audience", "platform", "target_duration_seconds", "narrative_promise", "must_keep", "must_not"})
+    facts = _list(data["facts_sources"], "facts_sources")
+    audits = _list(data["reference_audits"], "reference_audits")
+    shots = _list(data["shot_cards"], "shot_cards")
+    cues = _list(data["cue_sheet"], "cue_sheet")
+    decisions = _list(data["review_decisions"], "review_decisions")
+    return ProductionContract(
+        creative_contract=CreativeContract(
+            creative["production_profile"], creative["audience"], creative["platform"], creative["target_duration_seconds"],
+            creative["narrative_promise"], _tuple_of_text(creative["must_keep"], "creative_contract.must_keep"), _tuple_of_text(creative["must_not"], "creative_contract.must_not"),
+        ),
+        facts_sources=tuple(FactSource(**_mapping(item, "facts_sources item", {"id", "claim", "source", "approved"})) for item in facts),
+        reference_audits=tuple(ReferenceAudit(**_mapping(item, "reference_audits item", {"audit_id", "shot_id", "subject_type", "requirement", "requested", "submitted", "applied", "outcome", "reason", "proof_media_ref"})) for item in audits),
+        shot_cards=tuple(_shot_card_from_dict(item) for item in shots),
+        cue_sheet=tuple(Cue(**_mapping(item, "cue_sheet item", {"cue_id", "start_seconds", "end_seconds", "kind", "content", "shot_id"})) for item in cues),
+        review_decisions=tuple(_review_decision_from_dict(item) for item in decisions),
+    )
+
+
+def _shot_card_from_dict(value: object) -> ShotCard:
+    data = _mapping(value, "shot_cards item", {"shot_id", "purpose", "subject", "action", "scene", "camera", "lighting", "duration_seconds", "must_keep", "must_not", "reference_audit_refs"})
+    return ShotCard(
+        data["shot_id"], data["purpose"], data["subject"], data["action"], data["scene"], data["camera"], data["lighting"], data["duration_seconds"],
+        _tuple_of_text(data["must_keep"], "shot_cards.must_keep"), _tuple_of_text(data["must_not"], "shot_cards.must_not"), _tuple_of_text(data["reference_audit_refs"], "shot_cards.reference_audit_refs"),
+    )
+
+
+def _review_decision_from_dict(value: object) -> ReviewDecision:
+    data = _mapping(value, "review_decisions item", {"target_type", "target_id", "target_revision", "decision", "reasons", "score", "confidence", "reviewer", "reviewed_at"})
+    return ReviewDecision(
+        data["target_type"], data["target_id"], data["target_revision"], data["decision"], _tuple_of_text(data["reasons"], "review_decisions.reasons"),
+        data["score"], data["confidence"], data["reviewer"], data["reviewed_at"],
+    )
+
+
+def _revision_to_dict(record: ContractRevision) -> dict[str, object]:
+    return {"revision": record.revision, "created_at": record.created_at, "reason": record.reason, "contract": _contract_to_dict(record.contract)}
+
+
+def _revision_from_dict(value: object) -> ContractRevision:
+    data = _mapping(value, "revision", {"revision", "created_at", "reason", "contract"})
+    return ContractRevision(data["revision"], data["created_at"], data["reason"], _contract_from_dict(data["contract"]))
+
+
+def _decode_ledger(value: object) -> list[ContractRevision]:
+    data = _mapping(value, "ledger", {"schema_version", "current_revision", "revisions"})
+    if type(data["schema_version"]) is not int or data["schema_version"] != _LEDGER_SCHEMA_VERSION:
+        raise VideoGenError("unsupported ledger schema_version")
+    if type(data["current_revision"]) is not int or data["current_revision"] <= 0:
+        raise VideoGenError("current_revision must be a positive integer")
+    records = [_revision_from_dict(item) for item in _list(data["revisions"], "revisions")]
+    if not records:
+        raise VideoGenError("revisions must not be empty")
+    if [record.revision for record in records] != list(range(1, len(records) + 1)):
+        raise VideoGenError("revisions must be continuous from 1")
+    if data["current_revision"] != records[-1].revision:
+        raise VideoGenError("current_revision must point to the last revision")
+    return records
+
+
+def _read_ledger(path: Path) -> list[ContractRevision]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return _decode_ledger(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, VideoGenError) as exc:
+        raise VideoGenError(f"{path}: invalid production contract ledger: {exc}") from exc
+
+
+def _write_ledger(path: Path, payload: dict[str, object]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise VideoGenError(f"{path}: unable to write production contract ledger: {exc}") from exc
+
+
+def load_current_contract(project_dir: Path) -> ProductionContract | None:
+    path = _ledger_path(project_dir)
+    if not path.exists():
+        return None
+    return _read_ledger(path)[-1].contract
+
+
+def load_contract_revision(project_dir: Path, revision: int) -> ProductionContract:
+    _positive_int(revision, "revision")
+    path = _ledger_path(project_dir)
+    if not path.exists():
+        raise VideoGenError(f"{path}: revision {revision} does not exist")
+    for record in _read_ledger(path):
+        if record.revision == revision:
+            return record.contract
+    raise VideoGenError(f"{path}: revision {revision} does not exist")
+
+
+def append_contract_revision(project_dir: Path, contract: ProductionContract, *, reason: str) -> ContractRevision:
+    _text(reason, "reason")
+    if type(contract) is not ProductionContract:
+        raise VideoGenError("contract must be a ProductionContract")
+    path = _ledger_path(project_dir)
+    records = _read_ledger(path) if path.exists() else []
+    record = ContractRevision(len(records) + 1, datetime.now(timezone.utc).isoformat(), reason, contract)
+    all_records = [*records, record]
+    _write_ledger(path, {"schema_version": _LEDGER_SCHEMA_VERSION, "current_revision": record.revision, "revisions": [_revision_to_dict(item) for item in all_records]})
+    return record
