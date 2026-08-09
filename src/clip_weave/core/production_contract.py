@@ -7,6 +7,7 @@ revision ledgers, and pipeline integration belong to later layers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from numbers import Real
 
 from clip_weave.adapters.video_gen import VideoGenError
@@ -35,12 +36,12 @@ def _choice(value: object, field: str, choices: set[str], *, allow_none: bool = 
 
 
 def _positive(value: object, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Real) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or value <= 0:
         raise VideoGenError(f"{field} must be greater than 0")
 
 
 def _unit_interval(value: object, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Real) or not 0 <= value <= 1:
+    if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value) or not 0 <= value <= 1:
         raise VideoGenError(f"{field} must be between 0 and 1")
 
 
@@ -155,6 +156,8 @@ class Cue:
             or isinstance(self.end_seconds, bool)
             or not isinstance(self.start_seconds, Real)
             or not isinstance(self.end_seconds, Real)
+            or not isfinite(self.start_seconds)
+            or not isfinite(self.end_seconds)
             or self.start_seconds < 0
             or self.start_seconds > self.end_seconds
         ):
@@ -195,25 +198,36 @@ def _unique_ids(records: tuple[object, ...], attribute: str, field: str) -> set[
 @dataclass(frozen=True)
 class ProductionContract:
     creative_contract: CreativeContract
-    fact_sources: tuple[FactSource, ...]
+    facts_sources: tuple[FactSource, ...]
     reference_audits: tuple[ReferenceAudit, ...]
     shot_cards: tuple[ShotCard, ...]
-    cues: tuple[Cue, ...]
+    cue_sheet: tuple[Cue, ...]
     review_decisions: tuple[ReviewDecision, ...]
 
     def __post_init__(self) -> None:
-        for field in ("fact_sources", "reference_audits", "shot_cards", "cues", "review_decisions"):
-            if not isinstance(getattr(self, field), tuple):
+        if type(self.creative_contract) is not CreativeContract:
+            raise VideoGenError("creative_contract must be a CreativeContract")
+        collections: tuple[tuple[str, tuple[object, ...], type[object]], ...] = (
+            ("facts_sources", self.facts_sources, FactSource),
+            ("reference_audits", self.reference_audits, ReferenceAudit),
+            ("shot_cards", self.shot_cards, ShotCard),
+            ("cue_sheet", self.cue_sheet, Cue),
+            ("review_decisions", self.review_decisions, ReviewDecision),
+        )
+        for field, records, expected_type in collections:
+            if not isinstance(records, tuple):
                 raise VideoGenError(f"{field} must be a tuple")
-        _unique_ids(self.fact_sources, "id", "fact_sources")
+            if any(type(record) is not expected_type for record in records):
+                raise VideoGenError(f"{field} must contain only {expected_type.__name__}")
+        _unique_ids(self.facts_sources, "id", "facts_sources")
         audit_ids = _unique_ids(self.reference_audits, "audit_id", "reference_audits")
         shot_ids = _unique_ids(self.shot_cards, "shot_id", "shot_cards")
-        _unique_ids(self.cues, "cue_id", "cues")
+        _unique_ids(self.cue_sheet, "cue_id", "cue_sheet")
         _unique_ids(self.review_decisions, "target_id", "review_decisions")
         for shot in self.shot_cards:
             for audit_id in shot.reference_audit_refs:
                 if audit_id not in audit_ids:
                     raise VideoGenError(f"reference_audit_refs contains unknown audit_id {audit_id}")
-        for item in self.cues:
+        for item in self.cue_sheet:
             if item.shot_id not in shot_ids:
                 raise VideoGenError(f"cue shot_id references unknown shot {item.shot_id}")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from dataclasses import FrozenInstanceError
+from math import inf, nan
 
 import pytest
 
@@ -97,7 +99,7 @@ def review_decision(**overrides: object) -> ReviewDecision:
 def valid_contract(**overrides: object) -> ProductionContract:
     values: dict[str, object] = {
         "creative_contract": creative_contract(),
-        "fact_sources": (
+        "facts_sources": (
             FactSource(
                 id="fact-1",
                 claim="The product supports shared review.",
@@ -107,7 +109,7 @@ def valid_contract(**overrides: object) -> ProductionContract:
         ),
         "reference_audits": (reference_audit(),),
         "shot_cards": (shot_card(),),
-        "cues": (cue(),),
+        "cue_sheet": (cue(),),
         "review_decisions": (review_decision(),),
     }
     values.update(overrides)
@@ -118,9 +120,20 @@ def test_valid_complete_snapshot_is_frozen() -> None:
     contract = valid_contract()
 
     assert contract.shot_cards[0].reference_audit_refs == ("audit-1",)
-    assert contract.cues[0].shot_id == "shot-1"
+    assert contract.cue_sheet[0].shot_id == "shot-1"
     with pytest.raises(FrozenInstanceError):
         contract.creative_contract.audience = "another audience"  # type: ignore[misc]
+
+
+def test_contract_exposes_approved_top_level_field_names() -> None:
+    assert [field.name for field in fields(ProductionContract)] == [
+        "creative_contract",
+        "facts_sources",
+        "reference_audits",
+        "shot_cards",
+        "cue_sheet",
+        "review_decisions",
+    ]
 
 
 def test_contract_rejects_dangling_reference_audit() -> None:
@@ -153,9 +166,14 @@ def test_unknown_enum_values_are_rejected(factory: object, overrides: dict[str, 
         (reference_audit, {"outcome": "accepted", "requested": None}, "requested"),
         (reference_audit, {"outcome": "accepted", "applied": None}, "applied"),
         (reference_audit, {"outcome": "dropped", "reason": None}, "reason"),
+        (reference_audit, {"outcome": "blocked", "reason": None}, "reason"),
+        (creative_contract, {"target_duration_seconds": nan}, "target_duration_seconds"),
+        (creative_contract, {"target_duration_seconds": inf}, "target_duration_seconds"),
         (shot_card, {"duration_seconds": 0}, "duration_seconds"),
         (cue, {"start_seconds": -1}, "start_seconds"),
         (cue, {"start_seconds": 4, "end_seconds": 3}, "end_seconds"),
+        (cue, {"start_seconds": nan}, "start_seconds"),
+        (cue, {"end_seconds": inf}, "end_seconds"),
         (review_decision, {"score": 1.1}, "score"),
         (review_decision, {"confidence": -0.1}, "confidence"),
     ],
@@ -168,10 +186,10 @@ def test_core_value_constraints_are_rejected(factory: object, overrides: dict[st
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
-        ("fact_sources", (FactSource("fact-1", "claim", "brief", True),) * 2),
+        ("facts_sources", (FactSource("fact-1", "claim", "brief", True),) * 2),
         ("reference_audits", (reference_audit(),) * 2),
         ("shot_cards", (shot_card(),) * 2),
-        ("cues", (cue(),) * 2),
+        ("cue_sheet", (cue(),) * 2),
         ("review_decisions", (review_decision(),) * 2),
     ],
 )
@@ -182,4 +200,20 @@ def test_contract_rejects_duplicate_ids(field: str, replacement: tuple[object, .
 
 def test_contract_rejects_cue_for_unknown_shot() -> None:
     with pytest.raises(VideoGenError, match=r"cue.*shot_id.*shot-missing"):
-        valid_contract(cues=(cue(shot_id="shot-missing"),))
+        valid_contract(cue_sheet=(cue(shot_id="shot-missing"),))
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("creative_contract", object()),
+        ("facts_sources", (object(),)),
+        ("reference_audits", (object(),)),
+        ("shot_cards", (object(),)),
+        ("cue_sheet", (object(),)),
+        ("review_decisions", (object(),)),
+    ],
+)
+def test_contract_rejects_wrong_child_object_type(field: str, replacement: object) -> None:
+    with pytest.raises(VideoGenError, match=field):
+        valid_contract(**{field: replacement})
