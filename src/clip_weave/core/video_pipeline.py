@@ -133,6 +133,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_hash_matches(result: ClipResult) -> bool:
+    artifact_sha256 = result.artifact_sha256
+    if not (
+        isinstance(artifact_sha256, str)
+        and len(artifact_sha256) == 64
+        and all(char in "0123456789abcdef" for char in artifact_sha256)
+        and result.video_path
+    ):
+        return False
+    try:
+        path = Path(result.video_path)
+        return path.is_file() and _sha256_file(path) == artifact_sha256
+    except OSError:
+        return False
+
+
 def _atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
@@ -487,16 +503,19 @@ def generate_clips(
         )
         existing = _find_clip(manifest, manifest_path, frame.index, result.request_fingerprint)
         if existing:
-            if existing.state == "succeeded" and existing.video_path and Path(existing.video_path).exists():
-                results.append(existing)
-                continue
             if existing.state == "succeeded":
+                if _artifact_hash_matches(existing):
+                    results.append(existing)
+                    continue
                 existing.video_path = None
-                existing.state = (
-                    "download_pending"
-                    if existing.video_url or existing.inline_payload_path
-                    else "running"
-                )
+                existing.artifact_sha256 = None
+                existing.error = "artifact integrity check failed"
+                if existing.video_url or existing.inline_payload_path:
+                    existing.state = "download_pending"
+                elif existing.task_id:
+                    existing.state = "running"
+                else:
+                    existing.state = "failed"
                 _persist_clip(manifest_path, manifest, existing)
             results.append(existing)
             continue

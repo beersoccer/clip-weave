@@ -236,6 +236,107 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
     assert resumed.downloaded == []
 
 
+def test_completed_file_with_mismatched_artifact_hash_redownloads_without_submit(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = "0" * 64
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+@pytest.mark.parametrize("artifact_sha256", [None, "not-a-sha", "A" * 64])
+def test_completed_file_with_invalid_artifact_hash_redownloads_without_submit(
+    tmp_path, artifact_sha256
+):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["artifact_sha256"] = artifact_sha256
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_completed_file_with_unreadable_hash_redownloads_without_submit(tmp_path, monkeypatch):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+
+    def fail_hash(_path):
+        raise OSError("read failed")
+
+    monkeypatch.setattr(video_pipeline, "_sha256_file", fail_hash)
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["download_pending"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
+def test_invalid_completed_artifact_with_only_task_id_returns_to_polling(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="running", raw={})}),
+        frames=[1],
+        max_wait=0,
+    )
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].update(
+        state="succeeded",
+        video_path="missing.mp4",
+        artifact_sha256="0" * 64,
+        video_url=None,
+        inline_payload_path=None,
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel(polls={"task-1": TaskStatus(state="failed", raw={}, error="cancelled")})
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["failed"]
+    assert resumed.submitted == []
+    assert resumed.polled == ["task-1"]
+    assert resumed.downloaded == []
+
+
+def test_invalid_completed_artifact_without_recovery_source_fails_without_submit(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0].update(
+        video_path="missing.mp4",
+        artifact_sha256="0" * 64,
+        video_url=None,
+        inline_payload_path=None,
+        task_id=None,
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["failed"]
+    assert "artifact integrity check failed" in results[0].error
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded == []
+
+
 def test_legacy_manifest_without_fingerprint_does_not_resume_task(tmp_path):
     _run(
         tmp_path,
