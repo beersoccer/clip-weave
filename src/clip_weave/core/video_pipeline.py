@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -144,7 +145,7 @@ def _artifact_hash_matches(result: ClipResult) -> bool:
         return False
     try:
         path = Path(result.video_path)
-        return path.is_file() and _sha256_file(path) == artifact_sha256
+        return stat.S_ISREG(path.lstat().st_mode) and _sha256_file(path) == artifact_sha256
     except OSError:
         return False
 

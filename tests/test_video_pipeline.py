@@ -236,6 +236,26 @@ def test_completed_file_is_reused_without_provider_io(tmp_path):
     assert resumed.downloaded == []
 
 
+def test_completed_symlink_is_not_reused_even_when_artifact_hash_matches(tmp_path):
+    _run(tmp_path, model=FakeModel(), frames=[1])
+    video_path = tmp_path / "renders" / "ai-clips" / "doubao" / "01-开场.mp4"
+    target_path = video_path.with_name("original.mp4")
+    video_path.rename(target_path)
+    try:
+        video_path.symlink_to(target_path)
+    except (NotImplementedError, OSError) as exc:
+        target_path.rename(video_path)
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert [result.state for result in results] == ["succeeded"]
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+
+
 def test_completed_file_with_mismatched_artifact_hash_redownloads_without_submit(tmp_path):
     _run(tmp_path, model=FakeModel(), frames=[1])
     manifest = _manifest(tmp_path)
