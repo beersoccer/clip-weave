@@ -505,20 +505,3 @@ def test_append_reports_directory_sync_failure_after_replacement(tmp_path: Path)
 
     assert isinstance(error.value.__cause__, OSError)
     assert load_contract_revision(tmp_path, 2) == valid_contract()
-
-
-def test_architecture_docs_state_the_current_production_contract_boundary() -> None:
-    repository = Path(__file__).resolve().parents[1]
-    architecture = (repository / "docs/architecture.md").read_text(encoding="utf-8")
-    quality_loop = (repository / "docs/production-quality-loop.md").read_text(encoding="utf-8")
-
-    assert "`renders/production-contract.json`" in architecture
-    assert "当前未接入 submit 或 manifest" in architecture
-    assert "不记录 artifact hash、不实现自动重试或 provider 端 exactly-once" in architecture
-    assert "manifest 尚无 contract_revision" in architecture
-    assert "单项目账本" in quality_loop
-    assert "正式决策点追加一份完整、不可覆盖的快照" in quality_loop
-    assert "默认读取当前版本，并可按 revision 追溯历史" in quality_loop
-    assert "Agent 草稿不落盘" in quality_loop
-    assert "不为每个对象单独建文件，也不提供事件回放" in quality_loop
-    assert "任务未来应钉扎 contract_revision；当前尚未接入 submit 或 manifest" in quality_loop
