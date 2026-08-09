@@ -477,12 +477,10 @@ def _write_ledger_atomically(path: Path, payload: dict[str, object]) -> None:
             cleanup_error = exc
     if write_error is not None:
         if replacement_completed:
-            message = f"{path}: replacement completed, but unable to sync production contract ledger directory: {write_error}"
-        else:
-            message = f"{path}: unable to write production contract ledger: {write_error}"
-        if cleanup_error is not None:
-            message += f"; temporary ledger cleanup failed: {cleanup_error}"
-        raise VideoGenError(message) from write_error
+            raise VideoGenError(
+                f"{path}: replacement completed, but unable to sync production contract ledger directory: {write_error}"
+            ) from write_error
+        raise write_error
     if cleanup_error is not None:
         raise VideoGenError(f"{path}: unable to clean up temporary production contract ledger: {cleanup_error}") from cleanup_error
 

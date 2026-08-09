@@ -458,10 +458,10 @@ def test_append_replace_failure_preserves_existing_ledger_and_cleans_temporary_f
     original = path.read_bytes()
 
     with patch.object(os, "replace", side_effect=OSError("replace failed")):
-        with pytest.raises(VideoGenError, match=r"production-contract\.json.*replace failed") as error:
+        with pytest.raises(OSError, match="replace failed") as error:
             append_contract_revision(tmp_path, valid_contract(), reason="Second approval")
 
-    assert isinstance(error.value.__cause__, OSError)
+    assert type(error.value) is OSError
     assert path.read_bytes() == original
     assert list(path.parent.glob(".production-contract-*.tmp")) == []
 
@@ -473,13 +473,12 @@ def test_append_preserves_replace_failure_when_temporary_cleanup_fails(tmp_path:
 
     with patch.object(os, "replace", side_effect=OSError("replace failed")), patch.object(
         Path, "unlink", side_effect=OSError("cleanup failed")
-    ):
-        with pytest.raises(VideoGenError, match=r"production-contract\.json.*replace failed.*cleanup failed") as error:
+    ) as unlink:
+        with pytest.raises(OSError, match="replace failed") as error:
             append_contract_revision(tmp_path, valid_contract(), reason="Second approval")
 
-    assert type(error.value) is VideoGenError
-    assert isinstance(error.value.__cause__, OSError)
-    assert str(error.value.__cause__) == "replace failed"
+    assert type(error.value) is OSError
+    unlink.assert_called_once()
     assert path.read_bytes() == original
 
 
