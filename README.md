@@ -74,7 +74,7 @@ uv run python -m clip_weave gen-video videos/ev-launch/STORYBOARD.md \
 
 现有 T2V 路径已支持豆包、阿里和 Vertex 适配器，以及逐镜头的可恢复 `manifest.json`。非 dry-run 的 `gen-video` 会在任何提交前，针对选中 batch 的每个镜头，以已选 adapter 声明的静态 capability 检查比例、分辨率、时长和 reference；必需（`required`）reference 不能使用时，整个 batch 被阻止，不会提交任何镜头。可选（`optional`）reference 会按 capability 接受或丢弃，并将 accepted/dropped 结果、原因、requested parameters 与 applied parameters 写入 manifest。每次提交前、远端任务完成待下载时、下载完成或出现本地等待/下载错误时，清单都会原子更新。相同请求再次执行时会复用已完成文件，或仅继续轮询、下载既有任务；对于提交结果不确定的 `submitting` 记录，不会自动重提，以避免重复消耗模型额度。
 
-支持的远程 reference URI（包括已有 T2I 产物 URI）会直接传给 provider；本地 reference 则会在提交前物化为 provider 支持的 proof media URI。下载成功后，视频产物的 SHA-256 会写入 manifest；恢复时仅复用哈希复验相同的普通文件（不接受 symlink）。哈希缺失、非法或不匹配的记录只会按已有下载来源重新下载、按 task id 继续轮询，或标记为失败，绝不重新 submit。它不是 provider 端的 exactly-once 保证，且没有自动重试、`ffprobe` 或媒体 QC，也没有完整的 G0-G4 质量系统；清单不会自动重新提交任务。关键帧候选、镜头质量契约和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
+支持的远程 reference URI（包括已有 T2I 产物 URI）会直接传给 provider；本地 reference 则会在提交前物化为 provider 支持的 proof media URI。下载成功后，视频产物的 SHA-256 会写入 manifest；恢复时仅复用哈希复验相同的普通文件（不接受 symlink）。哈希缺失、非法或不匹配的记录只会按已有下载来源重新下载、按 task id 继续轮询，或标记为失败，绝不重新 submit。对已有 `running`/`download_pending` 记录，连接/超时、429 与 5xx 最多可排期三次短退避；429 会遵守 `Retry-After`。命令不会等待退避，而会提示下次恢复时间、继续处理其他可执行记录并快速返回。`submitting`、认证/权限、参数/capability、必需 reference、本地 I/O 和 provider 明确终态失败均不自动重试；每个 poll/download、等待、退避与预算耗尽都会通过进度输出提示，且明确本次未重新提交。它不是 provider 端的 exactly-once 保证，且没有 `ffprobe` 或媒体 QC，也没有完整的 G0-G4 质量系统；清单不会自动重新提交任务。关键帧候选、镜头质量契约和局部重做仍是后续范围；完整目标、优先级和借鉴边界见[生产质量流程](docs/production-quality-loop.md)。
 
 ### 本地 proof media
 
