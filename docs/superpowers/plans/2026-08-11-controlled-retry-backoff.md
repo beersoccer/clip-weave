@@ -151,7 +151,7 @@ attempts: int = 0
 next_retry_at: str | None = None
 ```
 
-在 `_clip_from_record()` 为缺失字段使用上述默认值；不提高 `_MANIFEST_SCHEMA_VERSION`。在 `video_pipeline.py` 定义 `MAX_RETRY_ATTEMPTS = 3`、`_utc_now()`、`_parse_retry_at()`、`_retry_is_due()`、`_schedule_retry()` 与 `_clear_retry()`。`_schedule_retry()` 只接受 `VideoGenError.error_class` 为 `network`、`rate_limited`、`server` 的错误，计算 1、2、4 秒 full-jitter 窗口，并以较长的正 `retry_after_seconds` 覆盖；三次后保持状态、清空 `next_retry_at`。非可恢复错误设置 `error_class="non_retryable"`、清空排期，防止后续自动 I/O。
+在 `_clip_from_record()` 为缺失字段使用上述默认值；不提高 `_MANIFEST_SCHEMA_VERSION`。在 `video_pipeline.py` 定义 `MAX_RETRY_ATTEMPTS = 3`、`_utc_now()`、`_parse_retry_at()`、`_retry_is_due()`、`_schedule_retry()` 与 `_clear_retry()`。`_schedule_retry()` 只接受 `VideoGenError.error_class` 为 `network`、`rate_limited`、`server` 的错误，前两次分别计算 1、2 秒 full-jitter 窗口，并以较长的正 `retry_after_seconds` 覆盖；第三次失败后保持状态、清空 `next_retry_at`。非可恢复错误设置 `error_class="non_retryable"`、清空排期，防止后续自动 I/O。
 
 在恢复分支、download 恢复循环和 `pending` 轮询集合构造前统一调用 `_retry_is_due()`：未来排期、非可恢复与耗尽记录只 report 并保留结果；到期记录才进入既有 `poll()`/`_download_clip()` 路径。poll/download 捕获 `VideoGenError` 时调用 `_schedule_retry()` 后立刻持久化并从本次待处理集合移除，不调用 `time.sleep()`；成功的 pending/running poll 和 `running -> download_pending` 转换调用 `_clear_retry()`。不得改变 `submitting` 的既有保护，也不得在任何 retry 分支调用 `vm.submit()`。
 

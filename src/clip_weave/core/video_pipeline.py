@@ -14,10 +14,12 @@ import hashlib
 import json
 import logging
 import os
+import random
 import stat
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlparse
@@ -88,11 +90,70 @@ class ClipResult:
     video_url: str | None = None
     inline_payload_path: str | None = None
     error: str | None = None
+    error_class: str | None = None
+    attempts: int = 0
+    next_retry_at: str | None = None
     elapsed_seconds: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
 _MANIFEST_SCHEMA_VERSION = 2
+_RETRYABLE_ERROR_CLASSES = frozenset({"network", "rate_limited", "server"})
+_MAX_RETRY_ATTEMPTS = 3
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _schedule_retry(result: ClipResult, error: VideoGenError) -> bool:
+    if error.error_class not in _RETRYABLE_ERROR_CLASSES:
+        result.error_class = "non_retryable"
+        result.next_retry_at = None
+        return False
+
+    result.error_class = error.error_class
+    result.attempts += 1
+    if result.attempts >= _MAX_RETRY_ATTEMPTS:
+        result.next_retry_at = None
+        return False
+
+    delay = random.uniform(0, 2 ** (result.attempts - 1))
+    if error.retry_after_seconds is not None:
+        delay = max(delay, error.retry_after_seconds)
+    result.next_retry_at = (_utc_now() + timedelta(seconds=delay)).isoformat()
+    return True
+
+
+def _clear_retry(result: ClipResult) -> None:
+    result.error_class = None
+    result.attempts = 0
+    result.next_retry_at = None
+
+
+def _retry_is_due(result: ClipResult) -> bool:
+    if result.error_class == "non_retryable":
+        return False
+    if result.error_class in _RETRYABLE_ERROR_CLASSES and result.attempts >= _MAX_RETRY_ATTEMPTS:
+        return False
+    if result.next_retry_at is None:
+        return True
+    try:
+        retry_at = datetime.fromisoformat(result.next_retry_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if retry_at.tzinfo is None:
+        return False
+    return _utc_now() >= retry_at.astimezone(timezone.utc)
+
+
+def _report_deferred_retry(result: ClipResult, report: Reporter) -> None:
+    if result.next_retry_at:
+        report(f"frame {result.index} 等待下一次运行恢复: {result.next_retry_at}; 本次未重新提交")
+    elif result.error_class == "non_retryable":
+        report(f"frame {result.index} automatic retry is disabled; 本次未重新提交")
+    else:
+        report(f"frame {result.index} automatic retries stopped; 本次未重新提交")
 
 
 def _request_fingerprint(
@@ -273,6 +334,9 @@ def _clip_from_record(record: dict[str, Any], manifest_path: Path) -> ClipResult
             video_url=record.get("video_url"),
             inline_payload_path=record.get("inline_payload_path"),
             error=record.get("error"),
+            error_class=record.get("error_class"),
+            attempts=int(record.get("attempts") or 0),
+            next_retry_at=record.get("next_retry_at"),
             elapsed_seconds=record.get("elapsed_seconds"),
             extra=dict(record.get("extra") or {}),
         )
@@ -331,6 +395,7 @@ def _download_clip(
                 delete=False,
             ) as handle:
                 temp = Path(handle.name)
+            report(f"frame {result.index} 正在下载已有结果")
             vm.download(status, temp)
             try:
                 os.link(temp, dest)
@@ -339,19 +404,42 @@ def _download_clip(
                 continue
             temp.unlink()
             result.artifact_sha256 = _sha256_file(dest)
+        except VideoGenError as exc:
+            if temp:
+                temp.unlink(missing_ok=True)
+            result.state = "download_pending"
+            result.artifact_sha256 = None
+            result.error = f"download failed: {exc}"
+            retry_scheduled = _schedule_retry(result, exc)
+            _persist_clip(manifest_path, manifest, result)
+            logger.error("frame %s download failed: %s", result.index, exc)
+            if retry_scheduled:
+                report(
+                    f"frame {result.index} download will retry at {result.next_retry_at} "
+                    f"({result.error_class}, attempt {result.attempts}); 本次未重新提交"
+                )
+            elif result.error_class == "non_retryable":
+                report(f"frame {result.index} download failed without automatic retry; 本次未重新提交")
+            else:
+                report(f"frame {result.index} automatic retries stopped; 本次未重新提交")
+            return
         except Exception as exc:  # noqa: BLE001 - download/IO surface
             if temp:
                 temp.unlink(missing_ok=True)
             result.state = "download_pending"
             result.artifact_sha256 = None
             result.error = f"download failed: {exc}"
+            result.error_class = "non_retryable"
+            result.next_retry_at = None
             _persist_clip(manifest_path, manifest, result)
             logger.error("frame %s download failed: %s", result.index, exc)
+            report(f"frame {result.index} download failed without automatic retry; 本次未重新提交")
             return
         break
     result.state = "succeeded"
     result.video_path = str(dest)
     result.error = None
+    _clear_retry(result)
     inline_payload_path = result.inline_payload_path
     result.inline_payload_path = None
     _persist_clip(manifest_path, manifest, result)
@@ -592,6 +680,9 @@ def generate_clips(
     for result in results:
         if result.state != "download_pending":
             continue
+        if not _retry_is_due(result):
+            _report_deferred_retry(result, report)
+            continue
         if not result.video_url and not result.inline_payload_path:
             if result.task_id:
                 result.state = "running"
@@ -623,7 +714,14 @@ def generate_clips(
         )
 
     # ── poll ─────────────────────────────────────────────────────────────────
-    pending = [r for r in results if r.state == "running" and r.task_id]
+    pending = []
+    for result in results:
+        if result.state != "running" or not result.task_id:
+            continue
+        if not _retry_is_due(result):
+            _report_deferred_retry(result, report)
+            continue
+        pending.append(result)
     for result in pending:
         started.setdefault(result.index, time.time())
     deadline = time.time() + max_wait
@@ -632,25 +730,39 @@ def generate_clips(
         still: list[ClipResult] = []
         for result in pending:
             try:
+                report(f"frame {result.index} 正在轮询已有任务 {result.task_id}")
                 status = vm.poll(result.task_id)  # type: ignore[arg-type]
             except VideoGenError as exc:
                 result.error = str(exc)
+                retry_scheduled = _schedule_retry(result, exc)
                 _persist_clip(manifest_path, manifest, result)
                 logger.error("frame %s poll failed: %s", result.index, exc)
+                if retry_scheduled:
+                    report(
+                        f"frame {result.index} poll will retry at {result.next_retry_at} "
+                        f"({result.error_class}, attempt {result.attempts}); 本次未重新提交"
+                    )
+                elif result.error_class == "non_retryable":
+                    report(f"frame {result.index} poll failed without automatic retry; 本次未重新提交")
+                else:
+                    report(f"frame {result.index} automatic retries stopped; 本次未重新提交")
                 continue
             if status.state in ("pending", "running"):
-                if result.error:
+                if result.error or result.error_class or result.attempts or result.next_retry_at:
                     result.error = None
+                    _clear_retry(result)
                     _persist_clip(manifest_path, manifest, result)
                 still.append(result)
                 continue
             result.elapsed_seconds = round(time.time() - started.get(result.index, time.time()), 1)
             if status.state == "failed":
                 result.state, result.error = "failed", status.error or "task failed"
+                _clear_retry(result)
                 _persist_clip(manifest_path, manifest, result)
                 logger.error("frame %s failed: %s", result.index, result.error)
                 continue
             result.video_url = status.video_url
+            _clear_retry(result)
             if status.video_b64:
                 inline_payload_path = _inline_payload_path(out, result)
                 _atomic_write_inline_payload(inline_payload_path, status.video_b64)

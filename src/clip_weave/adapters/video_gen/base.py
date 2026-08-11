@@ -12,11 +12,15 @@ three protocol-specific bits: `submit`, `poll`, and how the result is fetched.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -31,6 +35,43 @@ DEFAULT_MAX_WAIT = 900
 
 class VideoGenError(RuntimeError):
     """Raised for configuration and non-recoverable API errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: Literal["network", "rate_limited", "server"] | None = None,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    value = headers.get("Retry-After") if headers else None
+    if not isinstance(value, str):
+        return None
+    try:
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    return seconds if seconds > 0 else None
+
+
+def _safe_endpoint(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 @dataclass
@@ -156,6 +197,29 @@ class VideoModel:
             "Content-Type": "application/json",
         }
 
+    def _http_error(self, status_code: int, url: str, text: str, headers: Any) -> VideoGenError:
+        error_class: Literal["rate_limited", "server"] | None = None
+        retry_after = None
+        if status_code == 429:
+            error_class = "rate_limited"
+            retry_after = _retry_after_seconds(headers)
+        elif 500 <= status_code <= 599:
+            error_class = "server"
+        return VideoGenError(
+            f"{self.cfg.name}: HTTP {status_code} from {_safe_endpoint(url)} — {text[:500]}",
+            error_class=error_class,
+            status_code=status_code,
+            retry_after_seconds=retry_after,
+        )
+
+    def _request_error(self, url: str, exc: requests.RequestException) -> VideoGenError:
+        error_class: Literal["network"] | None = None
+        if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+            error_class = "network"
+        return VideoGenError(
+            f"{self.cfg.name}: request to {_safe_endpoint(url)} failed: {exc}", error_class=error_class
+        )
+
     def _request(
         self,
         method: str,
@@ -170,17 +234,15 @@ class VideoModel:
         try:
             resp = self.session.request(method, url, json=json, headers=merged, timeout=timeout)
         except requests.RequestException as exc:
-            raise VideoGenError(f"{self.cfg.name}: request to {url} failed: {exc}") from exc
+            raise self._request_error(url, exc) from None
 
         if resp.status_code >= 400:
-            raise VideoGenError(
-                f"{self.cfg.name}: HTTP {resp.status_code} from {url} — {resp.text[:500]}"
-            )
+            raise self._http_error(resp.status_code, url, resp.text, resp.headers)
         try:
             return resp.json()
         except ValueError as exc:
             raise VideoGenError(
-                f"{self.cfg.name}: non-JSON response from {url} — {resp.text[:200]}"
+                f"{self.cfg.name}: non-JSON response from {_safe_endpoint(url)} — {resp.text[:200]}"
             ) from exc
 
     def wait(
@@ -215,12 +277,18 @@ class VideoModel:
             if url.startswith("gs://"):
                 # Only works for publicly readable objects; otherwise use gsutil.
                 url = "https://storage.googleapis.com/" + url[len("gs://") :]
-            with self.session.get(url, stream=True, timeout=600) as resp:
-                resp.raise_for_status()
-                with dest.open("wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=1 << 16):
-                        if chunk:
-                            fh.write(chunk)
+            try:
+                with self.session.get(url, stream=True, timeout=600) as resp:
+                    if resp.status_code >= 400:
+                        raise self._http_error(resp.status_code, url, resp.text, resp.headers)
+                    with dest.open("wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=1 << 16):
+                            if chunk:
+                                fh.write(chunk)
+            except VideoGenError:
+                raise
+            except requests.RequestException as exc:
+                raise self._request_error(url, exc) from None
             return dest
         if status.video_b64:
             import base64

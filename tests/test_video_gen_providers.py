@@ -13,7 +13,7 @@ from clip_weave.adapters.video_gen import (
     get_model,
 )
 from clip_weave.adapters.video_gen.ali import AliVideoModel
-from clip_weave.adapters.video_gen.base import ProviderConfig, TaskStatus
+from clip_weave.adapters.video_gen.base import ProviderConfig, TaskStatus, _retry_after_seconds
 from clip_weave.adapters.video_gen.doubao import DoubaoVideoModel
 from clip_weave.adapters.video_gen.vertex import VertexVideoModel
 
@@ -21,15 +21,25 @@ _NOT_JSON = object()
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200, text=""):
+    def __init__(self, payload, status_code=200, text="", headers=None):
         self._payload = payload
         self.status_code = status_code
         self.text = text or str(payload)
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is _NOT_JSON:
             raise ValueError("not json")
         return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def iter_content(self, chunk_size):
+        return iter(())
 
 
 class FakeSession:
@@ -87,6 +97,77 @@ def test_provider_capabilities_preserves_reference_schemes_positional_argument()
     )
     assert capabilities.reference_uri_schemes == frozenset({"gs"})
     assert capabilities.supported_resolution_ratios is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_class"),
+    [(429, "rate_limited"), (500, "server"), (502, "server")],
+)
+def test_request_exposes_retryable_http_metadata(status_code, error_class):
+    session = FakeSession(FakeResponse({}, status_code=status_code, headers={"Retry-After": "9"}))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+
+    with pytest.raises(VideoGenError) as raised:
+        vm._request("GET", "http://gw/d/task-1")
+
+    assert raised.value.error_class == error_class
+    assert raised.value.status_code == status_code
+    assert raised.value.retry_after_seconds == (9.0 if status_code == 429 else None)
+
+
+@pytest.mark.parametrize("exception", [requests.Timeout("slow"), requests.ConnectionError("offline")])
+def test_request_exposes_retryable_network_metadata(exception):
+    class FailingSession:
+        def request(self, *args, **kwargs):
+            raise exception
+
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=FailingSession())
+
+    with pytest.raises(VideoGenError) as raised:
+        vm._request("GET", "http://gw/d/task-1")
+
+    assert raised.value.error_class == "network"
+    assert raised.value.status_code is None
+
+
+def test_request_leaves_client_error_non_retryable():
+    session = FakeSession(FakeResponse({}, status_code=401))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+
+    with pytest.raises(VideoGenError) as raised:
+        vm._request("GET", "http://gw/d/task-1")
+
+    assert raised.value.error_class is None
+    assert raised.value.retry_after_seconds is None
+
+
+def test_request_error_does_not_echo_a_signed_url():
+    session = FakeSession(FakeResponse({}, status_code=503))
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=session)
+
+    with pytest.raises(VideoGenError) as raised:
+        vm._request("GET", "https://cdn.example/video.mp4?signature=secret")
+
+    assert "signature=secret" not in str(raised.value)
+
+
+def test_download_exposes_retryable_server_metadata(tmp_path):
+    class DownloadSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse({}, status_code=503)
+
+    vm = DoubaoVideoModel(_cfg("doubao", "http://gw/d", "seedance"), session=DownloadSession())
+
+    with pytest.raises(VideoGenError) as raised:
+        vm.download(TaskStatus(state="succeeded", raw={}, video_url="https://cdn/video.mp4"), tmp_path / "v.mp4")
+
+    assert raised.value.error_class == "server"
+    assert raised.value.status_code == 503
+
+
+@pytest.mark.parametrize("value", ["inf", "-1", "Wed, 21 Oct 2015 07:28:00 GMT"])
+def test_retry_after_rejects_nonfinite_negative_and_past_values(value):
+    assert _retry_after_seconds({"Retry-After": value}) is None
 
 
 # ── clamp_duration ────────────────────────────────────────────────────────────

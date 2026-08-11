@@ -9,6 +9,7 @@ import errno
 import json
 import os
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,8 @@ class FakeModel:
     def poll(self, task_id):
         self.polled.append(task_id)
         if self.poll_error:
+            if isinstance(self.poll_error, Exception):
+                raise self.poll_error
             raise VideoGenError(self.poll_error)
         n = self._poll_counts.get(task_id, 0)
         self._poll_counts[task_id] = n + 1
@@ -94,6 +97,8 @@ class FakeModel:
     def download(self, status, dest):
         self.download_statuses.append(status)
         if self.download_error:
+            if isinstance(self.download_error, Exception):
+                raise self.download_error
             raise OSError(self.download_error)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"fake mp4 bytes")
@@ -918,16 +923,17 @@ def test_atomic_manifest_write_syncs_parent_directory(tmp_path, monkeypatch):
     assert directory_fds[0] in synced_fds
 
 
-def test_download_failure_stays_download_pending_and_resumes_without_submit(tmp_path):
+def test_local_download_failure_stays_pending_without_automatic_resume(tmp_path):
     first_results = _run(tmp_path, model=FakeModel(download_error="disk full"), frames=[1])
     assert [result.state for result in first_results] == ["download_pending"]
 
     resumed = FakeModel()
     results = _run(tmp_path, model=resumed, frames=[1])
 
-    assert [result.state for result in results] == ["succeeded"]
+    assert [result.state for result in results] == ["download_pending"]
     assert resumed.submitted == []
-    assert resumed.downloaded
+    assert resumed.polled == []
+    assert resumed.downloaded == []
 
 
 def test_hash_failure_stays_download_pending_without_artifact_hash(tmp_path, monkeypatch):
@@ -945,7 +951,7 @@ def test_hash_failure_stays_download_pending_without_artifact_hash(tmp_path, mon
     assert record["artifact_sha256"] is None
 
 
-def test_inline_video_result_resumes_download_without_polling(tmp_path):
+def test_inline_video_local_failure_does_not_automatically_resume(tmp_path):
     _run(
         tmp_path,
         model=FakeModel(
@@ -962,11 +968,10 @@ def test_inline_video_result_resumes_download_without_polling(tmp_path):
     resumed = FakeModel()
     results = _run(tmp_path, model=resumed, frames=[1])
 
-    assert [result.state for result in results] == ["succeeded"]
+    assert [result.state for result in results] == ["download_pending"]
     assert resumed.submitted == []
     assert resumed.polled == []
-    assert resumed.downloaded
-    assert resumed.download_statuses[0].video_b64 == "ZmFrZSBtcDQ="
+    assert resumed.downloaded == []
     assert "ZmFrZSBtcDQ=" not in json.dumps(_manifest(tmp_path))
 
 
@@ -987,6 +992,198 @@ def test_transient_poll_error_keeps_task_running(tmp_path):
 
     assert [result.state for result in results] == ["running"]
     assert "gateway unavailable" in results[0].error
+
+
+def test_retryable_poll_error_persists_a_scheduled_resume_without_resubmit(tmp_path):
+    reports = []
+    results = _run(
+        tmp_path,
+        model=FakeModel(poll_error=VideoGenError("offline", error_class="network")),
+        frames=[1],
+        report=reports.append,
+    )
+
+    record = _manifest(tmp_path)["clips"][0]
+    assert results[0].state == "running"
+    assert record["error_class"] == "network"
+    assert record["attempts"] == 1
+    assert record["next_retry_at"] is not None
+    assert any("本次未重新提交" in message for message in reports)
+
+
+def test_rate_limited_poll_uses_the_longer_retry_after_delay(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        video_pipeline, "_utc_now", lambda: datetime(2026, 8, 11, tzinfo=timezone.utc)
+    )
+    monkeypatch.setattr(video_pipeline.random, "uniform", lambda _low, _high: 0)
+
+    _run(
+        tmp_path,
+        model=FakeModel(
+            poll_error=VideoGenError(
+                "slow down", error_class="rate_limited", retry_after_seconds=9
+            )
+        ),
+        frames=[1],
+    )
+
+    assert _manifest(tmp_path)["clips"][0]["next_retry_at"] == "2026-08-11T00:00:09+00:00"
+
+
+def test_future_poll_retry_does_not_call_provider_or_resubmit(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(poll_error=VideoGenError("offline", error_class="network")),
+        frames=[1],
+    )
+
+    reports = []
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1], report=reports.append)
+
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert any("等待下一次运行恢复" in message for message in reports)
+
+
+def test_due_poll_retry_only_uses_existing_task_and_clears_retry_metadata(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(poll_error=VideoGenError("offline", error_class="network")),
+        frames=[1],
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert results[0].state == "succeeded"
+    assert resumed.submitted == []
+    assert resumed.polled == ["task-1"]
+    assert (results[0].error_class, results[0].attempts, results[0].next_retry_at) == (None, 0, None)
+
+
+def test_retryable_download_error_is_scheduled_and_waits_without_provider_io(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(download_error=VideoGenError("cdn offline", error_class="network")),
+        frames=[1],
+    )
+    record = _manifest(tmp_path)["clips"][0]
+    assert record["state"] == "download_pending"
+    assert (record["error_class"], record["attempts"]) == ("network", 1)
+    assert record["next_retry_at"] is not None
+
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded == []
+
+
+def test_due_download_retry_only_downloads_and_clears_retry_metadata(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(download_error=VideoGenError("cdn offline", error_class="network")),
+        frames=[1],
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    results = _run(tmp_path, model=resumed, frames=[1])
+
+    assert results[0].state == "succeeded"
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded
+    assert (results[0].error_class, results[0].attempts, results[0].next_retry_at) == (None, 0, None)
+
+
+def test_local_download_error_is_not_automatically_retried(tmp_path):
+    _run(tmp_path, model=FakeModel(download_error="disk full"), frames=[1])
+    record = _manifest(tmp_path)["clips"][0]
+    assert (record["error_class"], record["attempts"], record["next_retry_at"]) == (
+        "non_retryable", 0, None
+    )
+
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.polled == []
+    assert resumed.downloaded == []
+
+
+def test_third_retryable_failure_stops_automatic_polling(tmp_path):
+    for expected_attempt in (1, 2, 3):
+        _run(
+            tmp_path,
+            model=FakeModel(poll_error=VideoGenError("offline", error_class="network")),
+            frames=[1],
+        )
+        manifest = _manifest(tmp_path)
+        record = manifest["clips"][0]
+        assert record["attempts"] == expected_attempt
+        if expected_attempt < 3:
+            record["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+            path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.polled == []
+
+
+def test_provider_terminal_failure_clears_previous_retry_metadata(tmp_path):
+    _run(
+        tmp_path,
+        model=FakeModel(poll_error=VideoGenError("offline", error_class="network")),
+        frames=[1],
+    )
+    path = tmp_path / "renders" / "ai-clips" / "doubao" / "manifest.json"
+    manifest = _manifest(tmp_path)
+    manifest["clips"][0]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    results = _run(
+        tmp_path,
+        model=FakeModel(polls={"task-1": TaskStatus(state="failed", raw={}, error="cancelled")}),
+        frames=[1],
+    )
+
+    assert results[0].state == "failed"
+    assert (results[0].error_class, results[0].attempts, results[0].next_retry_at) == (None, 0, None)
+
+
+def test_non_retryable_poll_error_never_schedules_or_retries(tmp_path):
+    _run(tmp_path, model=FakeModel(poll_error=VideoGenError("forbidden")), frames=[1])
+    record = _manifest(tmp_path)["clips"][0]
+    assert (record["error_class"], record["attempts"], record["next_retry_at"]) == (
+        "non_retryable", 0, None
+    )
+
+    resumed = FakeModel()
+    _run(tmp_path, model=resumed, frames=[1])
+
+    assert resumed.submitted == []
+    assert resumed.polled == []
+
+
+def test_report_announces_existing_poll_and_download_actions(tmp_path):
+    reports = []
+    _run(tmp_path, model=FakeModel(), frames=[1], report=reports.append)
+
+    assert any("正在轮询已有任务" in message for message in reports)
+    assert any("正在下载已有结果" in message for message in reports)
 
 
 def test_submitting_record_is_never_resubmitted(tmp_path):

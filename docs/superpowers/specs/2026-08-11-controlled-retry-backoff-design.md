@@ -30,7 +30,7 @@ provider 返回 `TaskStatus(state="failed")` 一律是明确终态失败，直�
 
 ## 退避与状态机
 
-一次可恢复失败将 `attempts` 加一。第 1、2、3 次分别使用 full jitter 的指数窗口 1、2、4 秒；即随机延迟位于 `[0, window]`。429 的 `Retry-After` 若比该随机延迟更长，以该服务端值为准。`next_retry_at` 必须是从注入的当前 UTC 时间计算出的时间戳。
+一次可恢复失败将 `attempts` 加一。第 1、2 次分别使用 full jitter 的指数窗口 1、2 秒；即随机延迟位于 `[0, window]`。429 的 `Retry-After` 若比该随机延迟更长，以该服务端值为准。`next_retry_at` 必须是从注入的当前 UTC 时间计算出的时间戳。
 
 第 3 次失败后，记录保持 `running` 或 `download_pending`，保存最后错误和分类，清空 `next_retry_at`，且该记录不再自动调用 provider。一次成功的轮询观察（`pending` 或 `running`）会清除错误分类、清空 `next_retry_at` 并将连续 `attempts` 归零；状态转换到 `download_pending` 也归零。
 

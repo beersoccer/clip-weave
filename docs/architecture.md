@@ -44,7 +44,7 @@ clip-weave 是视频生产的前置编排层，不是另一个视频模型或完
 
 `core/t2v_prompt.py` 将 storyboard 转为可编辑的 `T2V-PROMPTS.md`。图形化的 scene 会被改写成可拍摄镜头，无法安全改写的 frame 会标记为 `needs_review`。`core/generation_preflight.py` 是 adapter capability 与 `core/video_pipeline.py` 之间纯本地的 G0 边界：它使用已选 adapter 的静态 capability 校验请求、归一化时长，并审计 reference，不发网络请求、不发现远程能力，也不构成完整质量系统。支持的远程 URI（包括已有 T2I 产物）直接通过；本地 reference 在本地预检阶段由 `core/proof_media.py` 按 provider 支持的 scheme 物化。`core/video_pipeline.py` 仅在选中 batch 全部通过预检和本地 reference 物化后才负责选中镜头的 submit → poll → download，并写入 `renders/ai-clips/<provider>/manifest.json`；必需 reference 不能使用时会阻止整个 batch，optional reference 则按 capability 接受或丢弃。`concat_clips()` 用 FFmpeg 合流。provider 适配器位于 `adapters/video_gen/`，目前包括 doubao、ali 和 vertex。
 
-manifest 是版本化的耐久状态记录。它为每个选中镜头保存规范请求指纹、预检的 requested parameters 与 applied parameters，以及轻量首帧 reference audit 的 accepted/dropped 结果和原因；该审计已写入 manifest。清单在提交前写入 `submitting`、拿到 task id 后写入 `running`、远端成功后先写入 `download_pending`、下载完成后写入 `succeeded`。同一指纹再次运行时，已有完成文件会直接复用，运行中的任务只会轮询，待下载记录只会下载；`submitting`（提交结果不确定）和 provider 明确失败的记录都不会自动重提。清单通过临时文件、`fsync` 和 `os.replace()` 原子更新。
+manifest 是版本化的耐久状态记录。它为每个选中镜头保存规范请求指纹、预检的 requested parameters 与 applied parameters，以及轻量首帧 reference audit 的 accepted/dropped 结果和原因；该审计已写入 manifest。清单在提交前写入 `submitting`、拿到 task id 后写入 `running`、远端成功后先写入 `download_pending`、下载完成后写入 `succeeded`。同一指纹再次运行时，已有完成文件会直接复用，运行中的任务只会轮询，待下载记录只会下载；`submitting`（提交结果不确定）和 provider 明确失败的记录都不会自动重提。`running` 与 `download_pending` 的记录还会保存可恢复的 `error_class`、连续 `attempts` 与 UTC `next_retry_at`：仅网络、429、5xx 可在后续命令中恢复已有 poll/download，最多三次；未到期时不做 provider I/O。清单通过临时文件、`fsync` 和 `os.replace()` 原子更新。
 
 本地 proof media 使用环境变量 `PROOF_MEDIA_<SCHEME>_UPLOAD_URL_TEMPLATE`、`PROOF_MEDIA_<SCHEME>_URI_TEMPLATE` 和可选的 `PROOF_MEDIA_<SCHEME>_UPLOAD_HEADERS_JSON` 配置 HTTP PUT 存储；模板必须含 `{sha256}` 与 `{suffix}`，且 URI template 必须产出对应 scheme。Vertex 选择 `gs`，所以 `PROOF_MEDIA_GS_URI_TEMPLATE` 必须产出 `gs://`；其 upload URL 可以是 `https://`。本地文件以 SHA-256、扩展名、scheme 和 URI 去重，并在 `renders/proof-media.json` 原子记录 provenance。仅“本次新上传、ledger 尚未写入”失败时尝试补偿删除远程对象；绝不因复用记录或 ledger 已替换后的错误删除对象。没有可用 store 时，required 会阻止 batch，optional 继续并在 manifest 审计为 `dropped`。
 
@@ -72,7 +72,7 @@ manifest 是版本化的耐久状态记录。它为每个选中镜头保存规�
 
 ## 4. 可靠性边界
 
-当前实现将每镜头 task id、状态、下载来源（URL 或内联内容的短生命周期 sidecar）、路径、错误、请求指纹，以及 requested/applied parameters 和 reference audit 写入 `manifest.json`，并在状态变化时原子持久化。本地 reference 的独立去重 ledger 为 `renders/proof-media.json`；支持的远程 URI 不会被上传或改写，也不做远程 capability discovery。恢复以相同请求指纹为边界，目标是避免本地重复提交；它不提供 provider 端 exactly-once，也没有自动重试，不会自动重新提交 `submitting` 或 `failed` 记录。
+当前实现将每镜头 task id、状态、下载来源（URL 或内联内容的短生命周期 sidecar）、路径、错误、请求指纹，以及 requested/applied parameters 和 reference audit 写入 `manifest.json`，并在状态变化时原子持久化。本地 reference 的独立去重 ledger 为 `renders/proof-media.json`；支持的远程 URI 不会被上传或改写，也不做远程 capability discovery。恢复以相同请求指纹为边界，目标是避免本地重复提交；它不提供 provider 端 exactly-once。只有既有 `running`/`download_pending` 的网络、429、5xx 错误可自动排期；前两次采用 1/2 秒 full-jitter 窗口，第三次失败后停止自动恢复，并以较长的 `Retry-After` 为准；本次命令不 sleep，而在报告下次恢复时间后返回。认证/权限、参数/capability、必需 reference、本地 I/O 与 provider 明确终态失败都不自动重试，`submitting` 或 `failed` 也绝不自动重新提交。进度 report 会显示 poll/download、等待、退避和预算耗尽；输出失败不会改变账本状态。
 
 当前实现会在下载落盘后计算视频 artifact 的 SHA-256，并将其写入 `ClipResult` 和 manifest。恢复 `succeeded` 记录时，只有平台提供 `O_NOFOLLOW`、`video_path` 能以该标志安全打开、同一文件描述符的 `fstat` 判定为普通文件，且从该文件描述符重新计算出的 SHA-256 与 manifest 中格式合法的哈希完全一致，才会复用该本地文件；没有 `O_NOFOLLOW` 时会 fail closed，不复用。哈希缺失、格式非法、文件缺失/非普通文件、读取失败或不匹配时，记录不再被信任：有已保存下载来源时只回到下载；只有 task id 时只回到轮询；两者都没有时标记为 `failed`；这些恢复路径绝不重新 submit。
 
